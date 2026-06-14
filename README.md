@@ -2,7 +2,7 @@
 
 File-protocol multi-agent orchestration for Claude Code. Delegate bounded tasks to worker agents in visible PowerShell windows, with session reuse and role-based prompt injection.
 
-[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![MIT License](https://img.shields.io/badge/license-GPL-blue.svg)](LICENSE)
 
 ## Install
 
