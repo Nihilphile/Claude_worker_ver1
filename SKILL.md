@@ -126,6 +126,24 @@ role unregister → templates deleted, registry entry removed
 
 Roles are shared across all orchestrators using the same manager. Name conflicts between orchestrators are surfaced (not silently overwritten), so naming conventions like `coder-tdd` vs `coder-explore-first` emerge naturally.
 
+### Editing Default Templates
+
+The default worker prompt is defined in two files under `prompt_templates/default/`. Edit them directly — no CLI needed, changes take effect on the next `send`.
+
+| File | Layer | Injected as | Purpose |
+|------|-------|------------|---------|
+| `system.md` | Layer 1 | `--system-prompt-file` | Worker runtime contract. Compression-resistant — Claude cannot forget these rules mid-session. Contains: completion script invocation, safety constraints, session reuse notice. |
+| `header.md` | Layer 3 | Task prompt preamble | Worker header. `~~ROLE~~` is replaced with the actual role name (e.g. `explorer`, `coder-tdd`). |
+
+**Example**: To add a global "no file editing" rule, append it to `system.md`:
+
+```markdown
+# my custom rule
+- Never modify files outside the assigned workspace.
+```
+
+All workers pick it up immediately.
+
 ### Built-in Role Labels
 
 These are just labels — no validation, no built-in prompt templates. Use them as-is or register custom ones.
@@ -286,6 +304,8 @@ Agent-level isolation: each agent_id has its own session_uuid. Multiple agents i
 | Directory | Purpose | Lifecycle |
 |-----------|---------|-----------|
 | `manager/` | agents.json — single state file | Persistent |
+| `prompt_templates/default/` | system.md, header.md — editable worker templates | Persistent |
+| `prompt_templates/role/` | Registered role templates | Persistent |
 | `store/<agent>/results/` | done.json, result.md | Persistent. Never auto-deleted. |
 | `run/<agent>/` | runner.ps1, prompt.txt, logs/ | Transient. Safe to delete. |
 | `.claude/` | worker-permissions.json | Persistent. |

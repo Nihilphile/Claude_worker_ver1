@@ -34,10 +34,16 @@ User --> ClaudeTui.ps1 (CLI + Manager)
            |     Sync-DoneToManager: done.json --> status + session_uuid
            |     Sync-DeadToFailed:  dead PIDs --> ["failed"]
            |
+           +-- prompt_templates/               Editable prompt layers
+           |     default/system.md               Layer 1: worker contract (--system-prompt-file)
+           |     default/header.md               Layer 3: worker header + ~~ROLE~~ placeholder
+           |     role/<name>/                   Registered role templates (Layer 2)
+           |
            +-- Send-ClaudeCommand.ps1 (launcher)
-                 |-- -p mode:  claude -p --output-format json --> runner parses JSON
-                 |-- TUI mode: claude --resume <uuid> (interactive window)
-                 |-- Runner process lifecycle managed by manager
+                 |-- Reads prompt templates from disk
+                 |-- -p mode:  claude --system-prompt-file ... -p --output-format json
+                 |-- TUI mode: claude --system-prompt-file ... (interactive window)
+                 +-- Runner process lifecycle managed by manager
 ```
 
 ## Key Design
@@ -48,8 +54,10 @@ User --> ClaudeTui.ps1 (CLI + Manager)
 | Dual-key identity | `internal_id` (GUID, system-assigned) + `agent_id` (user-chosen, semantic) |
 | Status array | `@("running")\|@("finished","ready")\|@("finished","consumed")\|@("failed")\|@("deleted")\|@("finishing")` |
 | Session UUID | Filesystem scan (new) or done.json (subsequent) --> agents.json --> --resume |
+| System prompt | `prompt_templates/default/system.md` — worker runtime contract, injected via `--system-prompt-file` (compression-resistant) |
 | Process cleanup | TUI: .exit signal --> 5s grace --> kill process tree. -p: auto-exits. |
 | Busy handling | Prompt [W]ait queue / [C]ancel. No kill option. |
+| Role system | `prompt_templates/role/<name>/` — registered role templates injected into prompts |
 
 ## Files
 
@@ -60,6 +68,8 @@ User --> ClaudeTui.ps1 (CLI + Manager)
 | `scripts/Complete-ClaudeTask.ps1` | TUI-mode completion handler (writes done.json + .exit signal) |
 | `scripts/Stop-ClaudeRuntime.ps1` | PID-based cleanup utility |
 | `manager/agents.json` | Single state file -- agent registry with status arrays |
+| `prompt_templates/default/` | system.md (worker contract), header.md (worker preamble) -- editable |
+| `prompt_templates/role/` | Registered role templates (via `role register` CLI) |
 | `store/<agent>/results/` | done.json, result.md (persistent) |
 | `run/<agent>/` | runner.ps1, prompt.txt, logs/ (transient) |
 | `.claude/worker-permissions.json` | Pre-approved permissions for worker agents |
