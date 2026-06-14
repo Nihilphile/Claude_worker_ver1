@@ -1,0 +1,22 @@
+# Transient runtime files
+run/*/
+run/*.lock
+!run/.gitkeep
+
+# Worker data (per-agent store)
+store/*/
+!store/.gitkeep
+
+# Manager state (runtime data)
+manager/agents.json
+manager/.create-session.lock
+
+# Temp / scratch
+temp/
+
+# OS junk
+Thumbs.db
+Desktop.ini
+
+# Local Claude settings (per-user trust, etc.)
+.claude/settings.local.json

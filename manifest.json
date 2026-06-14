@@ -1,0 +1,46 @@
+{
+  "name": "claude_worker_ver1",
+  "display_name": "Claude Worker v1",
+  "version": "0.1.0",
+  "description": "File-protocol multi-agent orchestration for Claude Code. Visible-terminal workers, one-shot runtime, persistent sessions.",
+  "entry_skill": "SKILL.md",
+  "default_workspace": "F:\AI_project\deepseek",
+  "requires": {
+    "claude_code": "2.1.172"
+  },
+  "scripts": {
+    "send_command": "scripts\Send-ClaudeCommand.ps1",
+    "wait_command": "scripts\Wait-ClaudeCommand.ps1",
+    "start_agent": "scripts\Start-ClaudeAgent.ps1",
+    "stop_agent": "scripts\Stop-ClaudeAgent.ps1",
+    "stop_runtime": "scripts\Stop-ClaudeRuntime.ps1",
+    "clear_runtime": "scripts\Clear-ClaudeRuntime.ps1",
+    "get_agent": "scripts\Get-ClaudeAgent.ps1",
+    "complete_task": "scripts\Complete-ClaudeTask.ps1",
+    "start_batch": "scripts\Start-ClaudeBatch.ps1",
+    "wait_batch": "scripts\Wait-ClaudeBatch.ps1",
+    "tui_cli": "scripts\ClaudeTui.ps1",
+    "manager_state": "run\manager.json"
+  },
+  "protocol": {
+    "mode": "tui-visible-terminal",
+    "store_root": "store\<agent>",
+    "run_root": "run\<agent>",
+    "status": "store\<agent>\status.json",
+    "thread": "store\<agent>\thread.json",
+    "registry": "store\registry.json",
+    "done": "store\<agent>\results\<command-id>.done.json",
+    "result": "store\<agent>\results\<command-id>.result.md",
+    "logs": "run\<agent>\logs\<command-id>.transcript.log",
+    "completion_detection": "Worker calls Complete-ClaudeTask.ps1 which writes done.json. Orchestrator polls for done.json.",
+    "session_reuse": "Default: --resume <session_id>. Use -FreshSession to start over.",
+    "auto_start_missing_agent": true,
+    "backend": "claude"
+  },
+  "roles": {
+    "explorer": { "writes_files": false, "status": "ready" },
+    "reviewer": { "writes_files": false, "status": "ready" },
+    "planner":  { "writes_files": false, "status": "ready" },
+    "worker":   { "writes_files": true, "status": "ready" }
+  }
+}
