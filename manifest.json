@@ -1,46 +1,46 @@
 {
   "name": "claude_worker_ver1",
   "display_name": "Claude Worker v1",
-  "version": "0.1.0",
-  "description": "File-protocol multi-agent orchestration for Claude Code. Visible-terminal workers, one-shot runtime, persistent sessions.",
+  "version": "0.2.0",
+  "description": "Manager-layer file-protocol multi-agent orchestration for Claude Code. Dual-mode runners (-p/TUI), role registry, system prompt templates.",
   "entry_skill": "SKILL.md",
-  "default_workspace": "F:\AI_project\deepseek",
   "requires": {
     "claude_code": "2.1.172"
   },
   "scripts": {
-    "send_command": "scripts\Send-ClaudeCommand.ps1",
-    "wait_command": "scripts\Wait-ClaudeCommand.ps1",
-    "start_agent": "scripts\Start-ClaudeAgent.ps1",
-    "stop_agent": "scripts\Stop-ClaudeAgent.ps1",
-    "stop_runtime": "scripts\Stop-ClaudeRuntime.ps1",
-    "clear_runtime": "scripts\Clear-ClaudeRuntime.ps1",
-    "get_agent": "scripts\Get-ClaudeAgent.ps1",
-    "complete_task": "scripts\Complete-ClaudeTask.ps1",
-    "start_batch": "scripts\Start-ClaudeBatch.ps1",
-    "wait_batch": "scripts\Wait-ClaudeBatch.ps1",
-    "tui_cli": "scripts\ClaudeTui.ps1",
-    "manager_state": "run\manager.json"
+    "cli_manager": "scripts/ClaudeTui.ps1",
+    "worker_launcher": "scripts/Send-ClaudeCommand.ps1",
+    "completion_handler": "scripts/Complete-ClaudeTask.ps1",
+    "runtime_cleanup": "scripts/Stop-ClaudeRuntime.ps1",
+    "legacy": [
+      "scripts/Start-ClaudeAgent.ps1",
+      "scripts/Start-ClaudeBatch.ps1",
+      "scripts/Stop-ClaudeAgent.ps1",
+      "scripts/Wait-ClaudeCommand.ps1",
+      "scripts/Wait-ClaudeBatch.ps1",
+      "scripts/Get-ClaudeAgent.ps1",
+      "scripts/Clear-ClaudeRuntime.ps1"
+    ]
+  },
+  "state": {
+    "canonical": "manager/agents.json"
+  },
+  "prompt_templates": {
+    "default": "prompt_templates/default/",
+    "roles": "prompt_templates/role/",
+    "registry": "prompt_templates/roles.json"
   },
   "protocol": {
-    "mode": "tui-visible-terminal",
-    "store_root": "store\<agent>",
-    "run_root": "run\<agent>",
-    "status": "store\<agent>\status.json",
-    "thread": "store\<agent>\thread.json",
-    "registry": "store\registry.json",
-    "done": "store\<agent>\results\<command-id>.done.json",
-    "result": "store\<agent>\results\<command-id>.result.md",
-    "logs": "run\<agent>\logs\<command-id>.transcript.log",
-    "completion_detection": "Worker calls Complete-ClaudeTask.ps1 which writes done.json. Orchestrator polls for done.json.",
-    "session_reuse": "Default: --resume <session_id>. Use -FreshSession to start over.",
-    "auto_start_missing_agent": true,
-    "backend": "claude"
+    "runners": ["-p", "tui"],
+    "session_uuid_source": "filesystem scan (new) or done.json (subsequent)",
+    "done": "store/<agent>/results/<command-id>.done.json",
+    "result": "store/<agent>/results/<command-id>.result.md",
+    "backend": "claude",
+    "permissions": ".claude/worker-permissions.json",
+    "system_prompt": "prompt_templates/default/system.md (--system-prompt-file)"
   },
-  "roles": {
-    "explorer": { "writes_files": false, "status": "ready" },
-    "reviewer": { "writes_files": false, "status": "ready" },
-    "planner":  { "writes_files": false, "status": "ready" },
-    "worker":   { "writes_files": true, "status": "ready" }
+  "stores": {
+    "persistent": ["store/<agent>/results/", "prompt_templates/"],
+    "transient": ["run/<agent>/"]
   }
 }
