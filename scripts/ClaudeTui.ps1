@@ -34,7 +34,6 @@ if ($Command -eq "wait") {
 }
 $Prompt    = Get-Arg "-Prompt";    if (-not $Prompt)    { $Prompt    = Get-Arg "-p" }
 $Workspace = Get-Arg "-Workspace"; if (-not $Workspace) { $Workspace = Get-Arg "-w" }
-if (-not $Workspace) { $Workspace = "F:\AI_project\deepseek" }
 $Role = Get-Arg "-Role"
 if (-not $Role) { $Role = Get-Arg "-r"; if (-not $Role) { $Role = "explorer" } }
 $TimeoutVal = Get-Arg "-TimeoutSeconds"
@@ -66,6 +65,16 @@ $roleTemplatesDir = Join-Path $skillRoot "prompt_templates\role"
 $sendScript = Join-Path $skillRoot "scripts\Send-ClaudeCommand.ps1"
 $stopRuntime = Join-Path $skillRoot "scripts\Stop-ClaudeRuntime.ps1"
 $createLockPath = Join-Path $skillRoot "manager\.create-session.lock"
+
+# Resolve default workspace if not explicitly set
+if (-not $Workspace) {
+    $configPath = Join-Path $skillRoot "manager\config.json"
+    if (Test-Path $configPath) {
+        try { $cfg = Get-Content $configPath -Raw | ConvertFrom-Json; $Workspace = $cfg.default_workspace } catch {}
+    }
+    if (-not $Workspace) { $Workspace = $env:CLAUDE_WORKER_DEFAULT_WS }
+    if (-not $Workspace) { $Workspace = (Get-Location).Path }
+}
 
 # For role register/update: collect -Files values
 $RoleFiles = @()

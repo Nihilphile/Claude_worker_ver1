@@ -9,6 +9,7 @@ store/*/
 
 # Manager state (runtime data)
 manager/agents.json
+
 manager/.create-session.lock
 
 # Temp / scratch

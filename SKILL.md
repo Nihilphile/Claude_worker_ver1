@@ -7,23 +7,32 @@ description: Delegate bounded tasks to Claude Code worker agents through manager
 
 File-protocol multi-agent orchestration for Claude Code. Workers run via `claude --resume <uuid>` in visible PowerShell windows. Manager (`manager/agents.json`) is the single state source.
 
-**Project root:** `F:\AI_project\Claude_worker_ver1`
+## Setup
+
+1. Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and configure API access.
+2. Clone this repo.
+3. Set default workspace (pick one):
+   - Create `manager/config.json`: `{"default_workspace": "F:/path/to/your/project"}`
+   - Env var: `$env:CLAUDE_WORKER_DEFAULT_WS = "F:/path/to/your/project"`
+   - Or pass `-Workspace` on every `send`.
+4. Run from project root:
+   ```powershell
+   $tui = "./scripts/ClaudeTui.ps1"
+   ```
 
 ## Execution Model
 
 Two runner modes (set with `-Mode`):
 
 - **`-p`** (default): Non-interactive. Claude exits cleanly. Best for automated pipelines.
-- **`tui`** (`-Mode tui`): Interactive Claude window. After completion, window stays open until CLI triggers cleanup (see Rule 10).
+- **`tui`** (`-Mode tui`): Interactive Claude window. After completion, window stays open until CLI triggers cleanup (see Rule 9).
 
 Both capture real Claude session UUIDs, support `--resume`, and write `result.md` + `done.json`. System prompt (`--system-prompt-file`) injects the worker runtime contract from `prompt_templates/default/system.md`.
 
 ## Quick Start
 
 ```powershell
-$tui = "F:\AI_project\Claude_worker_ver1\scripts\ClaudeTui.ps1"
-
-& $tui send my-coder -Prompt "Implement login" -Role worker
+& $tui send my-coder -Prompt "Implement login" -Role worker -Workspace "F:/path/to/myapp"
 & $tui agents                                   # list all
 & $tui agent my-coder                           # detail
 & $tui wait my-coder                            # wait
@@ -63,50 +72,49 @@ $tui = "F:\AI_project\Claude_worker_ver1\scripts\ClaudeTui.ps1"
 ### Single Worker
 
 ```powershell
-& $tui send coder -Prompt "Implement X" -Role worker
+& $tui send coder -Prompt "Implement X" -Role worker -Workspace "F:/myapp"
 & $tui result coder
 ```
 
 ### Multi-Turn with Session Reuse
 
 ```powershell
-& $tui send my-coder -Prompt "Read docs. Write questions."
+& $tui send my-coder -Prompt "Read docs. Write questions." -Workspace "F:/myapp"
 # orchestrator writes decisions...
-& $tui send my-coder -Prompt "Read decisions. Implement."
+& $tui send my-coder -Prompt "Read decisions. Implement." -Workspace "F:/myapp"
 ```
 
 ### Concurrent Multi-Worker
 
 ```powershell
-& $tui send coder-a -Prompt "..." -Role worker
-& $tui send coder-b -Prompt "..." -Role worker
-& $tui send reviewer-a -Prompt "..." -Role reviewer
+& $tui send coder-a -Prompt "..." -Role worker -Workspace "F:/myapp"
+& $tui send coder-b -Prompt "..." -Role worker -Workspace "F:/myapp"
 
 while ($true) {
     $done = & $tui wait any | ConvertFrom-Json
     if (-not $done) { break }
     & $tui result $done.agent_id
-    & $tui send $done.agent_id -Prompt "Next..."
+    & $tui send $done.agent_id -Prompt "Next..." -Workspace "F:/myapp"
 }
 ```
 
 ### Multi-Orchestrator
 
 ```powershell
-# Orchestrator A — only waits for its own workers
-& $tui send coder-a -Prompt "..." -Role worker
+# Orchestrator A
+& $tui send coder-a -Prompt "..." -Workspace "F:/myapp"
 & $tui wait coder-a
 
 # Orchestrator B
-& $tui send coder-b -Prompt "..." -Role worker
+& $tui send coder-b -Prompt "..." -Workspace "F:/myapp"
 & $tui wait coder-b
 ```
 
 ### Fresh Session / Long Tasks
 
 ```powershell
-& $tui send new -- Prompt "Fresh analysis" -FreshSession
-& $tui send heavy -- Prompt "Full rewrite" -TimeoutSeconds 3600
+& $tui send new --Prompt "Fresh analysis" -FreshSession -Workspace "F:/myapp"
+& $tui send heavy --Prompt "Full rewrite" -TimeoutSeconds 3600 -Workspace "F:/myapp"
 ```
 
 ## Reference

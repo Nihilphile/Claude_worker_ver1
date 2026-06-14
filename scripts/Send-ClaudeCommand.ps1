@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Prompt,
     [string]$AgentName = "claude-worker",
-    [string]$Workspace = "F:\AI_project\deepseek",
+    [string]$Workspace = "",
     [string]$Role = "explorer",
     [switch]$NoStartIfMissing,
     [switch]$FreshSession,

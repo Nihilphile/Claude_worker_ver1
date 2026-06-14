@@ -1,26 +1,39 @@
 # Claude Worker v1
 
-File-protocol multi-agent orchestration for Claude Code. Manager-layer persistent state (`manager/agents.json`), dual-mode runners (`-p` and TUI), agent-level session reuse via real Claude UUIDs.
+File-protocol multi-agent orchestration for Claude Code. Delegate bounded tasks to worker agents in visible PowerShell windows, with session reuse and role-based prompt injection.
+
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+## Install
+
+```powershell
+git clone https://github.com/Nihilphile/Claude_worker_ver1.git
+cd Claude_worker_ver1
+```
+
+**Prerequisites:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and API-configured.
+
+Then set your default workspace (the folder workers operate in):
+
+```powershell
+# Option A: Config file (recommended)
+echo '{"default_workspace": "F:/path/to/your/project"}' > manager/config.json
+
+# Option B: Environment variable
+$env:CLAUDE_WORKER_DEFAULT_WS = "F:/path/to/your/project"
+```
 
 ## Quick Start
 
 ```powershell
 $tui = ".\scripts\ClaudeTui.ps1"
 
-# Single task
-& $tui send my-coder -Prompt "Implement X" -Role worker -Workspace "F:\AI_project\myapp"
+# Launch a worker
+& $tui send my-coder -Prompt "Explain the project structure" -Role explorer
 
-# List all agents (Worker State + Output State columns)
+# Check results
 & $tui agents
-
-# Agent detail
-& $tui agent my-coder
-
-# Read result
 & $tui result my-coder
-
-# Soft-delete (frees agent_id)
-& $tui remove my-coder
 ```
 
 ## Architecture
