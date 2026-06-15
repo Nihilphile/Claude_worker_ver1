@@ -34,6 +34,10 @@ $tui = ".\scripts\ClaudeTui.ps1"
 # Check results
 & $tui agents
 & $tui result my-coder
+
+# Multi-project: use groups for isolation
+& $tui send my-coder -Prompt "..." -Role coder -Group "noname"
+& $tui wait group "noname"       # waits for entire group
 ```
 
 ## Architecture
@@ -72,6 +76,7 @@ User --> ClaudeTui.ps1 (CLI + Manager)
 | Dual-key identity | `internal_id` (GUID, system-assigned) + `agent_id` (user-chosen, semantic) |
 | Status array | `@("running")\|@("finished","ready")\|@("finished","consumed")\|@("failed")\|@("deleted")\|@("finishing")` |
 | Session UUID | Filesystem scan (new) or done.json (subsequent) --> agents.json --> --resume |
+| Agent groups | `-Group "name"` adds `group::` prefix to agent IDs. Global management, CLI-level filtering. `wait group <name>` waits for an entire group. |
 | System prompt | `prompt_templates/default/system.md` — state system manual (Update-WorkerState usage). Injected via `--system-prompt-file` (compression-resistant). Role `system_prompt/*.md` appended. |
 | Worker state | `Update-WorkerState.ps1` — ONLY worker-facing lifecycle interface. JSON .state files. Exit requires confirmation gate. |
 | Process cleanup | TUI: Sync-ReadState detects exit+confirmed → finishing → 5s grace → kill process tree. -p: auto-exits. |
@@ -87,7 +92,7 @@ User --> ClaudeTui.ps1 (CLI + Manager)
 | `scripts/Complete-ClaudeTask.ps1` | Deprecated (v2): convenience stub for writing result/done files. Not required by worker prompt. |
 | `scripts/Update-WorkerState.ps1` | Worker-facing state update (v2): writes JSON .state file. ONLY lifecycle interface. |
 | `scripts/Stop-ClaudeRuntime.ps1` | PID-based cleanup utility |
-| `manager/agents.json` | Single state file -- agent registry with status arrays. Includes `pending_task_error` for auto-continue diagnostics. |
+| `manager/agents.json` | Single state file -- agent registry with status arrays, `group` field, and `pending_task_error` for auto-continue diagnostics. |
 | `prompt_templates/default/` | system.md (worker contract), header.md (worker preamble) -- editable |
 | `prompt_templates/role/` | Registered role templates (via `role register` CLI) |
 | `store/<agent>/results/` | done.json, result.md (persistent) |

@@ -27,10 +27,17 @@ $tui = "F:\AI_project\Claude_worker_ver2\scripts\ClaudeTui.ps1"
   -Workspace "F:\path\to\project" `
   -Prompt "Implement the bounded change described here."
 
+# For multi-project isolation, use -Group to scope workers:
+& $tui send my-coder -Role coder -Group "my-project" -Mode p `
+  -Workspace "F:\path\to\project" -Prompt "..."
+# Equivalent shorthand: & $tui send my-project::my-coder ...
+
 # Wait, inspect, and read results.
 & $tui wait my-coder
 & $tui agent my-coder
 & $tui result my-coder
+# Or wait for an entire group:
+& $tui wait group "my-project"
 ```
 
 Use `-InjectNormal <name>` only when you explicitly want a reusable normal prompt
@@ -48,13 +55,49 @@ fragment:
 
 | Command | Use |
 |---------|-----|
-| `send <id> -Role <role> -Prompt <text> [-Workspace <path>] [-Mode p\|tui] [-FreshSession] [-InjectNormal <name>]` | Launch or resume a worker. |
-| `wait <id>` | Wait for a specific worker to finish. Note: sync side effects are global. |
-| `agent <id>` | Inspect one worker, including current task and state. |
-| `agents [--all]` | List workers. |
-| `result <id>` | Show state summary and optional `result.md`. |
-| `remove <id>` | Soft-delete one finished/failed worker. |
+| `send <id> -Role <role> -Prompt <text> [-Group <g>] [-Workspace <path>] [-Mode p\|tui] [-FreshSession] [-InjectNormal <name>]` | Launch or resume a worker. `-Group` scopes the agent for multi-project isolation. |
+| `wait <id> [<id> ...] [-Group <g>]` | Wait for specific workers. STATE messages only for listed IDs. |
+| `wait any [<id> ...] [-Group <g>]` | Wait for the first among listed (or group-scoped) workers. |
+| `wait group <group_name>` | Wait for every worker in a group to finish. |
+| `wait all [-Group <g>]` | Wait for all workers in scope. |
+| `agent <id> [-Group <g>]` | Inspect one worker, including current task and state. |
+| `agents [--all] [-Group <g>]` | List workers, optionally filtered by group. |
+| `result <id> [-Group <g>]` | Show state summary and optional `result.md`. |
+| `remove <id> [-Group <g>]` | Soft-delete one finished/failed worker. |
+| `remove all [-Group <g>] [-k <id1> ...]` | Soft-delete all finished/failed in scope. |
 | `role list/show/register/update/unregister` | Manage local roles. |
+
+## Agent Groups (Multi-Project Isolation)
+
+Groups solve the problem of running multiple projects from a single skill directory
+without log noise or `wait any` cross-contamination.
+
+```powershell
+# Terminal 1 — project A
+& $tui send my-coder -Role coder -Group "project-a" -Prompt "..."
+& $tui wait any -Group "project-a"      # only project-a STATE messages
+
+# Terminal 2 — project B
+& $tui send my-coder -Role coder -Group "project-b" -Prompt "..."
+# Both terminals can use the same short name "my-coder" —
+# internally they become "project-a::my-coder" and "project-b::my-coder"
+```
+
+**Agent ID prefix**: When `-Group` is passed, the agent ID internally becomes
+`"<group>::<name>"`. This means:
+
+- `send my-coder -Group "noname"` and `send noname::my-coder` are equivalent.
+- In `agent`, `result`, `wait`, `remove`, either short name + `-Group` or
+  the full `group::name` can be used.
+- Existing agents without a `group` field are unaffected (backward-compatible).
+
+**Manager internals**: The manager still manages all agents globally — Sync
+functions maintain full data integrity. Group filtering is a CLI-layer
+gate: `-Group` silences STATE/EXIT messages from other groups, and `wait`
+only considers group-matched workers.
+
+**Wait precision**: When `wait` lists specific agent IDs, Sync-All prints
+STATE/EXIT messages *only* for those IDs (not the whole group).
 
 ## Role System At A Glance
 
@@ -101,8 +144,9 @@ state and schema docs for exact fields and transitions.
 
 - Do not use `remove all` in a shared manager unless you are deliberately cleaning a
   known isolated environment.
-- Even `wait <specific-id>` runs global `Sync-All` and may process other orchestrators'
-  agents. Prefer explicit IDs and avoid `wait all`.
+- Even `wait <specific-id>` runs global `Sync-All` internally, but with `-Group`
+  active, messages are now scoped to the target group or listed IDs.
+  Use `-Group` for reliable isolation and avoid `wait all` without a group filter.
 - Prefer `-p` for reliable session reuse. TUI sessions killed by the manager after
   confirmed exit are not guaranteed resumable.
 - Register roles before sending. `send` preflight validates `legal_state.json` and

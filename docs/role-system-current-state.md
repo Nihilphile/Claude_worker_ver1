@@ -1,7 +1,7 @@
 # Role System v2 — Current State
 
-> **Date**: 2026-06-15  
-> **Status**: OPERATIONAL — All core features PASS. Known residual risks documented.
+> **Date**: 2026-06-16  
+> **Status**: OPERATIONAL — All core features PASS. Group isolation added. Known residual risks documented.
 
 ## Architecture (Four Layers)
 
@@ -32,6 +32,8 @@
 |---------|--------|-------------|
 | Role registration (v2 structure) | ✅ PASS | Multiple reports |
 | legal_state.json validation | ✅ PASS | Smoke plan Phase 0 |
+| Agent group isolation (`-Group`, `group::name`, `wait group`) | ✅ PASS | Live smoke test 2026-06-16 (send, agent, result, remove, wait, wait group, precise target filtering) |
+| Sync-All message gating (`$ActiveWaitTargets`) | ✅ PASS | Live smoke test 2026-06-16 |
 | InjectNormal end-to-end (CLI → worker prompt) | ✅ PASS | Targeted smoke 2026-06-15 (`V2_TEST_NORMAL_JSON_D4B7`) |
 | Queue transaction (Core semantics) | ✅ PASS | Queue final review (14/14 fixture tests) |
 | pending_task_error display | ✅ PASS | Boundary repair review (19/19 fixture tests) |
@@ -42,6 +44,7 @@
 | Missing template rejection (no zombie) | ✅ PASS | Targeted smoke 2026-06-15 |
 | Auto-continue failure preserves pending_task | ✅ PASS | Queue final review (static verification) |
 | Agent soft-delete preserves store/ | ✅ PASS | Operational |
+| Concurrent send race condition fix (stale cache) | ✅ FIXED | 2026-06-16 commit 8ac1fea |
 
 ## Parser Health
 
@@ -57,6 +60,7 @@
 | `Mock-SendFixture.ps1` | 19 | ALL PASS |
 | `Sync-DeadToFailed-Timeout-Tests.ps1` | 3 | ALL PASS |
 | Targeted smoke (2026-06-15) | 5 areas | ALL PASS |
+| Group isolation smoke (2026-06-16) | 7 areas | ALL PASS |
 
 ## Known Residual Risks
 
@@ -65,7 +69,7 @@
 | 1 | Crash window: `_DoLaunch` save ↔ `pending_task` clear could cause duplicate execution | Low | Extremely narrow window (same process, two consecutive `Save-Agents` calls) |
 | 2 | Orphan process window: launch JSON unparseable after process start | Low | Minimal window; process exists without agents.json entry |
 | 3 | No runtime behavioral tests for auto-continue catch path | Low | Static regex verification adequate for repair scope; mock-launch fixtures would improve coverage |
-| 4 | `wait` (even with explicit agent ID) runs global `Sync-All` and can process exits of **other** orchestrators' agents | Medium (UX) | Documented in SKILL.md rule 12; avoid `wait all`/`remove all` in shared managers |
+| 4 | `wait` (even with explicit agent ID) runs global `Sync-All` — mitigated by group filtering and `$ActiveWaitTargets` precision gating | Low (UX) | `-Group` scopes STATE/EXIT messages; `wait any A B` only prints for A/B; `wait group "g"` is the recommended pattern for group-scoped waits |
 | 5 | TUI force-killed sessions not guaranteed resumable | Medium (UX) | Documented; prefer `-p` mode for multi-turn workflows |
 | 6 | `Get-Process` in `Send-ClaudeCommand.ps1` still bare (not timeout-wrapped) | Low | Those queries target current/just-launched PIDs, not dead-PID table |
 | 7 | `pending_task_error` normalized but only displayed in `agent detail` (not in `agents` list) | Low | Diagnostic field; list view already shows status array |

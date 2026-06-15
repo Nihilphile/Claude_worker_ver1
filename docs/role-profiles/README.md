@@ -22,4 +22,5 @@ prompt text.
 | [coder](coder/README.md) | Bounded implementation after the orchestrator has supplied scope and acceptance criteria |
 | [explorer](explorer/README.md) | Targeted evidence gathering when implementation depends on unresolved facts |
 | [reviewer](reviewer/README.md) | Independent assessment of completed work, evidence, risks, and acceptance blockers |
+| [smoker](smoker/README.md) | Runtime smoke, live verification, regression checks, and acceptance runs |
 | [test](test/README.md) | Smoke-test role for exercising role-system features |

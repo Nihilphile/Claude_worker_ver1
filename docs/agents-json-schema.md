@@ -8,10 +8,11 @@
 {
   "054e45d3-...": {                    // internal_id (GUID, system key)
     "internal_id": "054e45d3-...",
-    "agent_id": "st_test",              // user-chosen semantic name
+    "agent_id": "st_test",              // user-chosen semantic name (group:: prefix for scoped agents)
     "status": ["finished","ready"],     // process + result state (see below)
     "session_uuid": "b369223d-...",     // real Claude UUID
     "default_mode": "p",                // "p" | "tui"
+    "group": "smoke",                   // optional — scopes agent for multi-project isolation (null when not set)
     "pid": null,                        // runner process ID (null when idle)
     "current_task": {
       "command_id": "20260614-...",
@@ -106,3 +107,45 @@ When `Sync-DoneToManager` auto-continue fails (launch or preflight throw):
 In v2, Sync-ReadState is the primary exit detection mechanism (reading `.state` JSON for `state=exit, confirmed=true`). The `.exit` file is a legacy fallback still supported by Sync-KillPending.
 
 All Sync functions are triggered by any CLI command — there is no background daemon.
+
+## Group Filtering (v2.1)
+
+The optional `group` field enables multi-project isolation without file-level
+separation. All agents remain in a single `agents.json`, but the CLI gates
+output and operations by group.
+
+### Query scope
+
+| Scenario | `agents` / `agent` / `result` / `remove` | `wait` / `wait any` / `wait all` |
+|----------|--------------------------------------------|----------------------------------|
+| No `-Group` | All agents (backward-compatible) | All agents |
+| `-Group "g"` | Only agents with `group="g"` | Only agents with `group="g"` |
+| `wait group "g"` | (N/A — separate command) | All agents with `group="g"` |
+
+### Agent ID prefix
+
+When `-Group "x"` is passed, `agent_id` is internally resolved to `"x::<name>"`:
+
+```
+send my-coder -Group "noname"     → agent_id="noname::my-coder"
+send noname::my-coder             → equivalent (group auto-extracted)
+```
+
+This prevents ID collisions: two users can both use `my-coder` in different groups.
+
+### Sync-All message gating
+
+`Sync-All` still processes all agents globally (data integrity). But
+`Write-Host` calls for STATE/EXIT messages are gated through
+`Test-GroupFilter`, which checks both `$ActiveGroup` and `$ActiveWaitTargets`:
+
+| Variable | Set by | Effect |
+|----------|--------|--------|
+| `$ActiveGroup` | All commands via `-Group` | Only agents in this group pass |
+| `$ActiveWaitTargets` | `Invoke-Wait` only | Only explicitly listed agent IDs pass (AND with group gate) |
+| Both unset | No filter | All agents pass (default) |
+
+Precision example: `wait any A B` sets `$ActiveWaitTargets` to `@("A","B")`.
+`Sync-All` prints STATE/EXIT only for A and B, even if C and D are in the
+same group and also running.
+
