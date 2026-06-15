@@ -50,6 +50,21 @@ $Group = Get-Arg "-Group"
 if (-not $Group) { $Group = Get-Arg "-g" }
 if (-not $Group) { $Group = "" }
 
+# Resolve agent names with group prefix.
+# When -Group is passed, the internal agent_id becomes "group::name".
+# User may also directly use "group::name" without -Group (equivalent).
+if ($Group) {
+    if ($AgentName -and $AgentName -notmatch '::' -and $AgentName -notin @('any','all','group')) {
+        $AgentName = "$Group::$AgentName"
+    }
+    $AgentNames = $AgentNames | ForEach-Object {
+        if ($_ -in @('any','all','group') -or $_ -match '::') { $_ }
+        else { "$Group::$_" }
+    }
+}
+# When -Group is NOT passed but user typed "group::name", agent_id stays as-is.
+# New-AgentEntry auto-extracts the group field from the :: prefix (see below).
+
 # For remove all -k: collect agent IDs to keep
 $KeepIds = @()
 if ($Command -eq "remove" -and ($scriptArgs -contains "-k" -or $scriptArgs -contains "-Keep")) {
@@ -106,9 +121,12 @@ if (-not $Command) {
     Write-Host ""
     Write-Host "Commands: send, agents, agent, wait, result, remove, role"
     Write-Host "  send   <agent_id> -Prompt <p> [-Role <r>] [-Workspace <w>] [-Group <g>] [-FreshSession] [-TimeoutSeconds <n>] [-Model <name>] [-Mode tui|p] [-InjectNormal <name>]"
+    Write-Host "         When -Group is set, agent_id becomes '<group>::<agent_id>' internally."
+    Write-Host "         You can also write '<group>::<agent_id>' directly without -Group."
     Write-Host "  agents [--all] [-Group <g>]"
     Write-Host "  agent  <agent_id> [-Group <g>]"
     Write-Host "  wait   any [<agent_id> ...] | <agent_id> [<agent_id> ...] | all [-Group <g>]"
+    Write-Host "  wait   group <group_name>"
     Write-Host "  result <agent_id> [-Group <g>]"
     Write-Host "  remove <agent_id> | all [-k <id1> [<id2> ...]] [-Group <g>]"
     Write-Host "  role   register <name> [-Force]"
@@ -184,19 +202,42 @@ function Find-ActiveAgent {
     return $null
 }
 
-# Group filtering (on): returns $true when entry matches active group or no filter is set.
-# When $ActiveGroup is empty (""), all entries match.
+# Group + target filtering: returns $true when entry matches active group AND wait-target list.
+# - $ActiveGroup: empty="" means all entries pass the group gate.
+# - $ActiveWaitTargets: $null means all entries pass the target gate (only set during Invoke-Wait).
+# Both gates are AND; both default to pass-through.
 function Test-GroupFilter {
     param($Entry)
-    if (-not $ActiveGroup) { return $true }
-    if (-not $Entry.PSObject.Properties["group"] -or -not $Entry.group) { return $false }
-    return $Entry.group -eq $ActiveGroup
+    # Group gate
+    if ($ActiveGroup) {
+        if (-not $Entry.PSObject.Properties["group"] -or -not $Entry.group) { return $false }
+        if ($Entry.group -ne $ActiveGroup) { return $false }
+    }
+    # Wait-target gate (only active during wait commands)
+    if ($ActiveWaitTargets -and $Entry.agent_id -notin $ActiveWaitTargets) {
+        return $false
+    }
+    return $true
 }
 $ActiveGroup = ""
+
+function Resolve-AgentName {
+    param([string]$Name, [string]$Group)
+    if (-not $Name) { return $Name }
+    if ($Name -in @('any','all','group')) { return $Name }
+    if ($Name -match '::') { return $Name }  # already has prefix
+    if ($Group) { return "$Group::$Name" }
+    return $Name
+}
+
+$script:ActiveWaitTargets = $null
 
 function New-AgentEntry {
     param([string]$AgentId)
     $now = (Get-Date).ToString("o")
+    # Auto-extract group from "group::name" prefix when -Group is not explicitly passed
+    $extractedGroup = $null
+    if ($AgentId -match '^([^:]+)::') { $extractedGroup = $Matches[1] }
     return [ordered]@{
         internal_id  = (New-InternalId)
         agent_id     = $AgentId
@@ -206,7 +247,7 @@ function New-AgentEntry {
         pid          = $null
         current_task = $null
         pending_task = $null
-        group        = $null
+        group        = $extractedGroup
         created_at   = $now
         updated_at   = $now
         deleted_at   = $null
@@ -973,15 +1014,21 @@ function Invoke-Wait {
     param([string[]]$Targets, [string]$Group = "")
     $script:ActiveGroup = $Group
 
-    # Helper: returns $true if an agent entry is "ready to consume" respecting group filter.
-    function Test-AgentIsReady {
-        param($e, [string]$Group)
-        if ("finished" -notin $e.status -or "ready" -notin $e.status) { return $false }
-        if (-not $Group) { return $true }
-        return ($e.PSObject.Properties["group"] -and $e.group -eq $Group)
+    # Set precise target filtering so Sync-All only prints STATE/EXIT for these agents.
+    # Other commands (agents, agent, result, remove) leave ActiveWaitTargets as $null.
+    $script:ActiveWaitTargets = if ($Targets -and $Targets.Count -gt 0 -and $Targets[0] -notin @("any","all")) {
+        @($Targets)
+    } elseif ($Targets -and $Targets.Count -ge 2 -and $Targets[0] -eq "any") {
+        @($Targets[1..($Targets.Count-1)])
+    } else {
+        $null
     }
 
-    if (-not $Targets -or $Targets.Count -eq 0) { Write-Host "Usage: ClaudeTui wait <any|all|agent_id [agent_id ...]>"; exit 1 }
+    if (-not $Targets -or $Targets.Count -eq 0) {
+        Write-Host "Usage: ClaudeTui wait <any|all|group|agent_id [agent_id ...]> [-Group <g>]"
+        $script:ActiveWaitTargets = $null
+        exit 1
+    }
 
     $Agents = Read-Agents
 
@@ -999,7 +1046,7 @@ function Invoke-Wait {
                 $found = Find-ActiveAgent -TargetAgentId $t -AgentsDict $Agents
                 if (-not $found) { continue }
                 $e = $found.entry
-                if (Test-AgentIsReady $e $Group) {
+                if ("finished" -in $e.status -and "ready" -in $e.status -and (Test-GroupFilter $e)) {
                     $e.status = @("finished","consumed"); $e.updated_at = (Get-Date).ToString("o")
                     Save-Agents -Agents $Agents
                     $nextKey = $found.key; break
@@ -1010,20 +1057,26 @@ function Invoke-Wait {
                 $next = $Agents[$nextKey]
                 Write-Host "[WAIT-ANY] $($next.agent_id) finished"
                 [ordered]@{ agent_id = $next.agent_id; command_id = $next.current_task.command_id } | ConvertTo-Json -Depth 3
+                $script:ActiveWaitTargets = $null
                 return
             }
 
             $anyRunning = ($Agents.Values | Where-Object {
                 $_.agent_id -in $subsetTargets -and "deleted" -notin $_.status -and ("running" -in $_.status -or "finishing" -in $_.status) -and (Test-GroupFilter $_)
             }).Count -gt 0
-            if (-not $anyRunning) { Write-Host "[WAIT-ANY] No running workers in subset."; return }
+            if (-not $anyRunning) {
+                Write-Host "[WAIT-ANY] No running workers in subset."
+                $script:ActiveWaitTargets = $null
+                return
+            }
             Start-Sleep -Seconds 2
         }
     }
 
     # ---- wait <agent_id> [agent_id ...] (multi-agent all) ----
     if ($Targets[0] -notin @("any","all")) {
-        Write-Host "[WAIT] Waiting for: $($Targets -join ', ')"
+        if ($Group) { Write-Host "[WAIT] Group: $Group | Waiting for: $($Targets -join ', ')" }
+        else { Write-Host "[WAIT] Waiting for: $($Targets -join ', ')" }
         $prevDone = -1
         while ($true) {
             Sync-All -Agents $Agents
@@ -1051,12 +1104,15 @@ function Invoke-Wait {
             $found = Find-ActiveAgent -TargetAgentId $Targets[0] -AgentsDict $Agents
             if ($found) { Write-Host "[WAIT] $($Targets[0]) done (Worker: $(Get-WorkerState $found.entry))" }
         }
+        $script:ActiveWaitTargets = $null
         return
     }
 
     $Target = $Targets[0]
 
+    # ---- wait any (group-scoped or global, no specific IDs) ----
     if ($Target -eq "any") {
+        if ($Group) { Write-Host "[WAIT-ANY] Waiting for any agent in group '$Group'..." }
         while ($true) {
             Sync-All -Agents $Agents
             Invalidate-Cache; $Agents = Read-Agents
@@ -1079,6 +1135,7 @@ function Invoke-Wait {
                 $next = $Agents[$nextKey]
                 Write-Host "[WAIT-ANY] $($next.agent_id) finished"
                 [ordered]@{ agent_id = $next.agent_id; command_id = $next.current_task.command_id } | ConvertTo-Json -Depth 3
+                $script:ActiveWaitTargets = $null
                 return
             }
 
@@ -1086,12 +1143,14 @@ function Invoke-Wait {
                 "deleted" -notin $_.status -and ("running" -in $_.status -or "finishing" -in $_.status) -and (Test-GroupFilter $_)
             }).Count -gt 0
 
-            if (-not $anyRunning) { Write-Host "[WAIT-ANY] No running workers."; return }
+            if (-not $anyRunning) { Write-Host "[WAIT-ANY] No running workers."; $script:ActiveWaitTargets = $null; return }
             Start-Sleep -Seconds 2
         }
     }
 
+    # ---- wait all (group-scoped or global) ----
     if ($Target -eq "all") {
+        if ($Group) { Write-Host "[WAIT-ALL] Group: $Group | Waiting for all agents..." }
         while ($true) {
             Sync-All -Agents $Agents
             Invalidate-Cache; $Agents = Read-Agents
@@ -1103,25 +1162,56 @@ function Invoke-Wait {
             Start-Sleep -Seconds 2
         }
         Write-Host "[WAIT-ALL] All workers finished."
+        $script:ActiveWaitTargets = $null
         Invoke-Agents -Group $Group
         return
     }
 
+    # ---- wait <single_agent_id> ----
     $found = Find-ActiveAgent -TargetAgentId $Target -AgentsDict $Agents
-    if (-not $found) { Write-Host "[WAIT] '$Target' not found."; exit 1 }
+    if (-not $found) { Write-Host "[WAIT] '$Target' not found."; $script:ActiveWaitTargets = $null; exit 1 }
 
     while ($true) {
         Sync-All -Agents $Agents
         Invalidate-Cache; $Agents = Read-Agents
         $found = Find-ActiveAgent -TargetAgentId $Target -AgentsDict $Agents
-        if (-not $found) { Write-Host "[WAIT] '$Target' removed."; return }
+        if (-not $found) { Write-Host "[WAIT] '$Target' removed."; $script:ActiveWaitTargets = $null; return }
         if ("running" -notin $found.entry.status -and "finishing" -notin $found.entry.status) {
             Write-Host "[WAIT] $Target done (Worker: $(Get-WorkerState $found.entry))"
             $found.entry | ConvertTo-Json -Depth 5
+            $script:ActiveWaitTargets = $null
             return
         }
         Start-Sleep -Seconds 2
     }
+}
+
+# ====================================================
+# wait group
+# ====================================================
+
+function Invoke-WaitGroup {
+    param([string]$GroupName)
+
+    if (-not $GroupName) { throw "Usage: ClaudeTui wait group <group_name>" }
+
+    $script:ActiveGroup = $GroupName
+    $script:ActiveWaitTargets = $null  # show all in this group
+
+    Write-Host "[WAIT-GROUP] Waiting for all agents in group '$GroupName'..."
+    $Agents = Read-Agents
+    while ($true) {
+        Sync-All -Agents $Agents
+        Invalidate-Cache; $Agents = Read-Agents
+        $running = @($Agents.Values | Where-Object {
+            "deleted" -notin $_.status -and ("running" -in $_.status -or "finishing" -in $_.status) -and (Test-GroupFilter $_)
+        })
+        if ($running.Count -eq 0) { break }
+        Write-Host ("[WAIT-GROUP] {0} worker(s) still running in group '{1}'..." -f $running.Count, $GroupName)
+        Start-Sleep -Seconds 2
+    }
+    Write-Host "[WAIT-GROUP] All workers in group '$GroupName' finished."
+    Invoke-Agents -Group $GroupName
 }
 
 # ====================================================
@@ -1509,7 +1599,14 @@ switch ($Command) {
     "send"   { Invoke-Send }
     "agents" { Invoke-Agents -Group $Group }
     "agent"  { Invoke-AgentDetail -AgentId $AgentName -Group $Group }
-    "wait"   { Invoke-Wait -Targets $AgentNames -Group $Group }
+    "wait"   {
+        if ($scriptArgs.Count -ge 3 -and $scriptArgs[1] -eq "group") {
+            $groupName = $scriptArgs[2]
+            Invoke-WaitGroup -GroupName $groupName
+        } else {
+            Invoke-Wait -Targets $AgentNames -Group $Group
+        }
+    }
     "result" { Invoke-Result -AgentId $AgentName -Group $Group }
     "remove" { Invoke-Remove -Target $AgentName -Keep $KeepIds -Group $Group }
     "role"   {
