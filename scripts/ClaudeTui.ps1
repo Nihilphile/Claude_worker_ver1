@@ -301,7 +301,11 @@ function Sync-DeadToFailed {
         $pidVal = $entry.pid
         if (-not $pidVal) { continue }
         try {
-            $proc = Get-Process -Id ([int]$pidVal) -ErrorAction SilentlyContinue
+            # Timeout-wrapped: zombie PIDs or locked process table can hang
+            $procJob = Start-Job -ScriptBlock { param($p) Get-Process -Id $p -ErrorAction SilentlyContinue } -ArgumentList ([int]$pidVal)
+            $proc = $null
+            if (Wait-Job $procJob -Timeout 3) { $proc = Receive-Job $procJob }
+            Remove-Job $procJob -Force -ErrorAction SilentlyContinue
             if (-not $proc) {
                 $entry.status = @("failed"); $entry.pid = $null
                 $entry.updated_at = (Get-Date).ToString("o")
