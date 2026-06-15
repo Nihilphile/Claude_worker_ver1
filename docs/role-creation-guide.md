@@ -85,7 +85,7 @@ The profile should briefly document:
 
 - when to use the role;
 - when not to use it;
-- legal states and typical flows;
+- legal states and state-selection notes;
 - available normal templates;
 - expected output types;
 - an orchestrator checklist for sending tasks.
@@ -99,6 +99,16 @@ useful information or controls a meaningful protocol boundary.
 
 Good states describe externally observable conditions, such as `investigating`,
 `verifying`, or `blocked`. Avoid turning every checklist item into a state.
+
+Do not design ordinary role states as a linear flow such as
+`running -> inspecting -> verifying -> exit`. Legal states are a palette of observable
+current-work labels. After `running`, the worker should choose the legal state that
+matches its real current phase, and then end with confirmed `exit` when the assigned
+work is genuinely done.
+
+Only smoke/protocol-test roles should require a worker to visit several states in a
+fixed order, and that requirement should live in a selected smoke task or
+`normal_prompt`, not in a generic role contract.
 
 For every custom state, the system prompt should say:
 
@@ -175,7 +185,9 @@ Then verify the role with a bounded smoke:
 - Asking the role to both gather evidence and make the orchestrator's final decision.
 - Putting optional procedures in the always-injected system prompt.
 - Using `normal_prompt` as an automatic task body.
-- Adding states without defining their transition semantics.
+- Adding states without defining when each state should be selected.
+- Presenting ordinary role states as a required linear path instead of current-work
+  labels.
 - Making `result.md` or another fixed artifact part of the exit contract.
 - Treating registration alone as proof that prompt injection and state validation work.
 - Forgetting to create or update `docs/role-profiles/<role>/README.md`.

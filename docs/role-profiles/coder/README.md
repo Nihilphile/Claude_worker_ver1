@@ -16,22 +16,20 @@ allowed scope, accepted baseline, and verification expectations.
 
 `running`, `inspecting`, `questioning`, `coding`, `verifying`, `exit`
 
-States are observable work stage labels, not a strictly linear workflow. The
-flows below are examples; only `running` and confirmed `exit` are mandatory.
-The coder may move between `coding`, `verifying`, and `inspecting` as the
-work requires. Never report a state you did not actually enter.
+States are observable work stage labels, not a workflow graph. Only `running`
+and confirmed `exit` are mandatory. After `running`, the coder should report
+whichever legal state best matches the real current phase. Never require a
+worker to visit every listed state unless the task is explicitly testing state
+transitions.
 
-Typical implementation flow (example):
+State selection notes:
 
-```text
-running -> inspecting -> coding -> verifying -> exit
-```
-
-Question-pass flow (example):
-
-```text
-running -> inspecting -> questioning -> exit
-```
+- Use `inspecting` while reading implementation context.
+- Use `questioning` for a Question Pass or unresolved orchestrator decisions.
+- Use `coding` while editing files.
+- Use `verifying` while running checks or validating the edited behavior.
+- End with confirmed `exit` after the requested artifact, report, or blocker
+  note exists.
 
 ## Normal Prompts
 
@@ -55,4 +53,3 @@ Before sending a coder task, provide:
 - implementation decision if already made;
 - verification expectations;
 - whether `-InjectNormal question-pass` is required.
-

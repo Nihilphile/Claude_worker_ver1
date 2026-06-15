@@ -3,8 +3,8 @@
 This directory is the orchestrator-facing role catalog.
 
 Role profiles are not prompt source files and are not injected into workers. They are
-short usage notes for the orchestrator before choosing a role, state flow, and optional
-`-InjectNormal` fragment.
+short usage notes for the orchestrator before choosing a role, state labels, and
+optional `-InjectNormal` fragment.
 
 Each registered role should have:
 

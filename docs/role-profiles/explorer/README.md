@@ -19,26 +19,21 @@ dependencies, contracts, regressions, or feasible options.
 
 `running`, `investigating`, `verifying`, `blocked`, `exit`
 
-States are observable work stage labels, not a strictly linear workflow. The
-flows below are examples; only `running` and confirmed `exit` are mandatory.
-The explorer may move between `investigating` and `verifying` as the work
-requires. Never report a state you did not actually enter.
+States are observable work stage labels, not a workflow graph. Only `running`
+and confirmed `exit` are mandatory. After `running`, the explorer should report
+whichever legal state best matches the real current phase. Never require a
+worker to visit every listed state unless the task is explicitly testing state
+transitions.
 
-Typical flow (example):
+State selection notes:
 
-```text
-running -> investigating -> verifying -> exit
-```
-
-Blocked investigation flow (example):
-
-```text
-running -> investigating -> blocked -> exit
-```
-
-Use `blocked` when the assigned question cannot be answered inside the authorized
-read/run scope and the orchestrator needs to provide a decision, permission, credential,
-or narrower question.
+- Use `investigating` during targeted source, document, log, or runtime probing.
+- Use `verifying` when cross-checking conclusions, rerunning probes, or checking
+  counterexamples.
+- Use `blocked` when the assigned question cannot be answered inside the authorized
+  read/run scope and the orchestrator needs to provide a decision, permission,
+  credential, or narrower question.
+- End with confirmed `exit` when the requested evidence or blocker note exists.
 
 ## Normal Prompts
 

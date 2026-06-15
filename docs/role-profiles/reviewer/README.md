@@ -20,22 +20,22 @@ runtime state.
 
 `running`, `inspecting`, `reviewing`, `verifying`, `blocked`, `exit`
 
-States are observable work stage labels, not a strictly linear workflow. The
-flows below are examples; only `running` and confirmed `exit` are mandatory.
-The reviewer may move between `reviewing` and `verifying` as the work
-requires. Never report a state you did not actually enter.
+States are observable work stage labels, not a workflow graph. Only `running`
+and confirmed `exit` are mandatory. After `running`, the reviewer should report
+whichever legal state best matches the real current phase. Never require a
+worker to visit every listed state unless the task is explicitly testing state
+transitions.
 
-Typical review flow (example):
+State selection notes:
 
-```text
-running -> inspecting -> reviewing -> verifying -> exit
-```
-
-Blocked review flow (example):
-
-```text
-running -> inspecting -> blocked -> exit
-```
+- Use `inspecting` while locating artifacts, claims, diffs, reports, tests, or
+  logs.
+- Use `reviewing` while evaluating correctness, risk, evidence, contracts, or
+  regressions.
+- Use `verifying` only when running allowed checks, reproducing a claim, or
+  cross-checking a suspected finding.
+- Use `blocked` when the assigned review cannot be completed inside scope.
+- End with confirmed `exit` when the review report or blocker note exists.
 
 ## Normal Prompts
 
@@ -60,4 +60,3 @@ Before sending a reviewer task, provide:
 - acceptance criteria or claimed behavior;
 - required verdict scale if it differs from `PASS`, `PASS WITH RISKS`, `FAIL`;
 - whether to use `-InjectNormal focused-review` or `-InjectNormal regression-review`.
-

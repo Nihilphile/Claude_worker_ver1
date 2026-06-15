@@ -17,7 +17,9 @@ updates, normal-template selection, and completion behavior.
 
 `running`, `coding`, `debugging`, `reviewing`, `exit`
 
-Typical smoke flow depends on the selected normal prompt and test objective.
+The `test` role is allowed to exercise ordered state changes because it is a protocol
+smoke role. The required sequence, if any, belongs in the selected normal prompt or
+task objective. Do not copy this pattern into ordinary roles.
 
 ## Normal Prompts
 
@@ -42,4 +44,3 @@ Before sending a test-role task, provide:
 - required state transitions;
 - marker or artifact checks;
 - whether result.md is forbidden, optional, or expected.
-
