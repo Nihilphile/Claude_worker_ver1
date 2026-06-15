@@ -44,6 +44,8 @@ if (-not $Model) { $Model = Get-Arg "-m" }
 $Mode = Get-Arg "-Mode"
 if (-not $Mode) { $Mode = Get-Arg "-M" }
 $ShowAll = Has-Flag "--all"
+$InjectNormal = Get-Arg "-InjectNormal"
+if (-not $InjectNormal) { $InjectNormal = "" }
 
 # For remove all -k: collect agent IDs to keep
 $KeepIds = @()
@@ -76,8 +78,9 @@ if (-not $Workspace) {
     if (-not $Workspace) { $Workspace = (Get-Location).Path }
 }
 
-# For role register/update: collect -Files values
+# For role register/update: collect -Files and -StateFile values
 $RoleFiles = @()
+$RoleStateFile = $null
 if ($Command -in @("role") -and $scriptArgs.Count -gt 1) {
     for ($i = 2; $i -lt $scriptArgs.Count; $i++) {
         if ($scriptArgs[$i] -eq "-Files" -or $scriptArgs[$i] -eq "-f") {
@@ -85,7 +88,12 @@ if ($Command -in @("role") -and $scriptArgs.Count -gt 1) {
                 if ($scriptArgs[$j] -like "-*") { break }
                 $RoleFiles += $scriptArgs[$j]
             }
-            break
+            continue
+        }
+        if ($scriptArgs[$i] -eq "-StateFile" -or $scriptArgs[$i] -eq "-sf") {
+            if ($i + 1 -lt $scriptArgs.Count -and $scriptArgs[$i+1] -notlike "-*") {
+                $RoleStateFile = $scriptArgs[$i+1]
+            }
         }
     }
 }
@@ -94,14 +102,14 @@ if (-not $Command) {
     Write-Host "ClaudeTui -- Claude Worker Manager"
     Write-Host ""
     Write-Host "Commands: send, agents, agent, wait, result, remove, role"
-    Write-Host "  send   <agent_id> -Prompt <p> [-Role <r>] [-Workspace <w>] [-FreshSession] [-TimeoutSeconds <n>] [-Model <name>] [-Mode tui|p]"
+    Write-Host "  send   <agent_id> -Prompt <p> [-Role <r>] [-Workspace <w>] [-FreshSession] [-TimeoutSeconds <n>] [-Model <name>] [-Mode tui|p] [-InjectNormal <name>]"
     Write-Host "  agents [--all]"
     Write-Host "  agent  <agent_id>"
     Write-Host "  wait   any [<agent_id> ...] | <agent_id> [<agent_id> ...] | all"
     Write-Host "  result <agent_id>"
     Write-Host "  remove <agent_id> | all [-k <id1> [<id2> ...]]"
-    Write-Host "  role   register <name> -Files <path> [<path> ...] [-Force]"
-    Write-Host "  role   update <name> -Files <path> [<path> ...]"
+    Write-Host "  role   register <name> [-Force]"
+    Write-Host "  role   update <name> [-Files <path> [<path> ...]] [-StateFile <path>]"
     Write-Host "  role   list | show <name> | unregister <name>"
     exit 0
 }
@@ -208,6 +216,7 @@ function Normalize-AgentEntry {
     Ensure-EntryProp $Entry "pid" $null
     Ensure-EntryProp $Entry "current_task" $null
     Ensure-EntryProp $Entry "pending_task" $null
+    Ensure-EntryProp $Entry "pending_task_error" $null
     Ensure-EntryProp $Entry "created_at" (Get-Date).ToString("o")
     Ensure-EntryProp $Entry "updated_at" (Get-Date).ToString("o")
     Ensure-EntryProp $Entry "deleted_at" $null
@@ -231,7 +240,9 @@ function Get-ClaudeProjectDir {
     $name = $full -replace '^([A-Z]):\\(.*)$', '$1--$2'
     $name = $name -replace '[\\/_]', '-'
     return Join-Path "$env:USERPROFILE\.claude\projects" $name
-}function Capture-FreshSessionUuid {
+}
+
+function Capture-FreshSessionUuid {
     param([string]$WorkspacePath, [int]$WaitSeconds = 4)
     Start-Sleep -Seconds $WaitSeconds
     $projDir = Get-ClaudeProjectDir $WorkspacePath
@@ -301,7 +312,11 @@ function Sync-DeadToFailed {
         $pidVal = $entry.pid
         if (-not $pidVal) { continue }
         try {
-            $proc = Get-Process -Id ([int]$pidVal) -ErrorAction SilentlyContinue
+            # Timeout-wrapped: zombie PIDs or locked process table can hang Get-Process ~30s
+            $procJob = Start-Job -ScriptBlock { param($p) Get-Process -Id $p -ErrorAction SilentlyContinue } -ArgumentList ([int]$pidVal)
+            $proc = $null
+            if (Wait-Job $procJob -Timeout 3) { $proc = Receive-Job $procJob }
+            Remove-Job $procJob -Force -ErrorAction SilentlyContinue
             if (-not $proc) {
                 $entry.status = @("failed"); $entry.pid = $null
                 $entry.updated_at = (Get-Date).ToString("o")
@@ -330,8 +345,6 @@ function Sync-DoneToManager {
         $safe = $entry.agent_id -replace '[^a-zA-Z0-9_.-]', '_'
         $donePath = Join-Path $skillRoot "store\$safe\results\$($task.command_id).done.json"
         if (-not (Test-Path -LiteralPath $donePath -PathType Leaf)) { continue }
-        $exitPath = Join-Path $skillRoot "run\$safe\.$($task.command_id).exit"
-        if (Test-Path -LiteralPath $exitPath -PathType Leaf) { continue }
         try {
             $done = Get-Content $donePath -Raw -Encoding UTF8 | ConvertFrom-Json
             $entry.status = @("finished","ready"); $entry.pid = $null
@@ -348,11 +361,128 @@ function Sync-DoneToManager {
     if ($changed) { Save-Agents -Agents $Agents }
     foreach ($as in $autoStarts) {
         $pending = $as.entry.pending_task
-        $as.entry.pending_task = $null
-        Save-Agents -Agents $Agents
         Write-Host "[AUTO-CONTINUE] Queued task for $($as.entry.agent_id) starting now..."
-        Invoke-SendInternal -AgentId $as.entry.agent_id -Prompt $pending.prompt -Role $pending.role -Model $pending.model
+        $pendingInjectNormal = if ($pending.PSObject.Properties["inject_normal"] -and $pending.inject_normal) { $pending.inject_normal } else { "" }
+        try {
+            Invoke-SendInternal -AgentId $as.entry.agent_id -Prompt $pending.prompt -Role $pending.role -Model $pending.model -InjectNormal $pendingInjectNormal
+            # Only after launch success: re-read fresh entry, clear pending_task, save
+            Invalidate-Cache; $Agents = Read-Agents
+            $foundAfter = Find-ActiveAgent -TargetAgentId $as.entry.agent_id -AgentsDict $Agents
+            if ($foundAfter) {
+                $foundAfter.entry.pending_task = $null
+                $foundAfter.entry.updated_at = (Get-Date).ToString("o")
+                Save-Agents -Agents $Agents
+            }
+        } catch {
+            Write-Host "[AUTO-CONTINUE] FAILED: launch/preflight threw; pending_task preserved. Error: $_"
+            # Do NOT clear pending_task. Record diagnostic.
+            Invalidate-Cache; $Agents = Read-Agents
+            $foundAfter = Find-ActiveAgent -TargetAgentId $as.entry.agent_id -AgentsDict $Agents
+            if ($foundAfter) {
+                if (-not $foundAfter.entry.PSObject.Properties["pending_task_error"]) {
+                    $foundAfter.entry | Add-Member -NotePropertyName "pending_task_error" -NotePropertyValue $null
+                }
+                $foundAfter.entry.pending_task_error = "Auto-continue failed at $(Get-Date -Format 'o'): $_"
+                $foundAfter.entry.updated_at = (Get-Date).ToString("o")
+                Save-Agents -Agents $Agents
+            }
+        }
     }
+}
+
+function Sync-ReadState {
+    param($Agents)
+    $changed = $false
+    foreach ($key in @($Agents.Keys)) {
+        $entry = $Agents[$key]
+        if ("deleted" -in $entry.status) { continue }
+        if ("running" -notin $entry.status) { continue }
+        $task = $entry.current_task
+        if (-not $task -or -not $task.command_id) { continue }
+        $safe = $entry.agent_id -replace '[^a-zA-Z0-9_.-]', '_'
+        $statePath = Join-Path $skillRoot "run\$safe\.$($task.command_id).state"
+        if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { continue }
+        try {
+            $stateContent = (Get-Content -LiteralPath $statePath -Raw -Encoding UTF8).Trim()
+            # v2: JSON format only
+            $parsedState = $null
+            $isConfirmed = $false
+            $stateSummary = $null
+            try {
+                $stateJson = $stateContent | ConvertFrom-Json
+                if ($stateJson.PSObject.Properties["state"]) {
+                    $parsedState = [string]$stateJson.state
+                }
+                if ($stateJson.PSObject.Properties["confirmed"]) {
+                    $isConfirmed = [bool]$stateJson.confirmed
+                }
+                if ($stateJson.PSObject.Properties["summary_message"]) {
+                    $stateSummary = [string]$stateJson.summary_message
+                }
+            } catch {
+                # Not valid JSON — skip this state file
+                Write-Host ("[STATE] {0}: .state file is not valid JSON, skipping" -f $entry.agent_id)
+                continue
+            }
+
+            if (-not $parsedState) { continue }
+
+            if (-not $entry.PSObject.Properties["current_state"]) {
+                $entry | Add-Member -NotePropertyName "current_state" -NotePropertyValue $null
+            }
+
+            if ($entry.current_state -ne $parsedState) {
+                $old = $entry.current_state
+                $roleName = if ($task.role) { $task.role } else { "explorer" }
+
+                # Validate against legal_state.json (mandatory in v2)
+                $roleDir = Join-Path $roleTemplatesDir $roleName
+                $legalPath = Join-Path $roleDir "legal_state.json"
+                if (-not (Test-Path -LiteralPath $legalPath -PathType Leaf)) {
+                    Write-Host ("[STATE] PROTOCOL ERROR: {0} role '{1}' has no legal_state.json" -f $entry.agent_id, $roleName)
+                    # Do NOT advance state; skip this agent until role is fixed
+                    continue
+                }
+                try {
+                    $legalJson = Get-Content -LiteralPath $legalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                    $legalStates = @($legalJson.states | ForEach-Object { [string]$_ })
+                    if ($parsedState -notin $legalStates) {
+                        Write-Host ("[STATE] HARD ERROR: {0} set illegal state '{1}' (legal: {2}). State NOT applied." -f $entry.agent_id, $parsedState, ($legalStates -join ', '))
+                        # Record the error but do NOT update current_state
+                        if (-not $entry.PSObject.Properties["state_error"]) {
+                            $entry | Add-Member -NotePropertyName "state_error" -NotePropertyValue $null
+                        }
+                        $entry.state_error = "Illegal state '$parsedState' at $(Get-Date -Format 'o')"
+                        $entry.updated_at = (Get-Date).ToString("o")
+                        $changed = $true
+                        continue
+                    }
+                } catch {
+                    Write-Host ("[STATE] ERROR: Could not parse legal_state.json for role '$roleName'")
+                    continue
+                }
+
+                $entry.current_state = $parsedState
+                $entry.updated_at = (Get-Date).ToString("o")
+
+                Write-Host ("[STATE] {0}: {1} -> {2}" -f $entry.agent_id, $old, $parsedState)
+                if ($stateSummary) {
+                    Write-Host ("[STATE]   summary: {0}" -f $stateSummary)
+                }
+                $changed = $true
+
+                # If state=exit and confirmed=true, transition to finishing
+                if ($parsedState -eq "exit" -and $isConfirmed) {
+                    $entry.status = @("finishing")
+                    $entry | Add-Member -NotePropertyName "exit_seen_at" -NotePropertyValue (Get-Date).ToString("o") -Force
+                    $entry.updated_at = (Get-Date).ToString("o")
+                    Write-Host ("[EXIT] {0}: state=exit confirmed=true, entering finishing" -f $entry.agent_id)
+                    $changed = $true
+                }
+            }
+        } catch {}
+    }
+    if ($changed) { Save-Agents -Agents $Agents }
 }
 
 function Sync-KillPending {
@@ -365,53 +495,120 @@ function Sync-KillPending {
         $task = $entry.current_task
         if (-not $task -or -not $task.command_id) { continue }
         $safe = $entry.agent_id -replace '[^a-zA-Z0-9_.-]', '_'
-        $exitPath = Join-Path $skillRoot "run\$safe\.$($task.command_id).exit"
-        if (-not (Test-Path -LiteralPath $exitPath -PathType Leaf)) { continue }
-        if ("running" -in $entry.status) {
-            $entry.status = @("finishing")
-            $entry | Add-Member -NotePropertyName "exit_seen_at" -NotePropertyValue (Get-Date).ToString("o") -Force
-            $entry.updated_at = (Get-Date).ToString("o")
-            Write-Host "[EXIT] $($entry.agent_id) .exit detected, entering 5s grace period"
-            $changed = $true
-            continue
-        }
-        $seenAt = try { [datetime]::Parse($entry.exit_seen_at) } catch { $null }
-        if (-not $seenAt) { continue }
-        $elapsed = ((Get-Date) - $seenAt).TotalSeconds
-        if ($elapsed -lt 5) {
-            Write-Host "[EXIT] $($entry.agent_id) grace period: $([math]::Floor($elapsed))s / 5s"
-            continue
-        }
-        $killPid = $entry.pid
-        if ($killPid) {
-            try {
-                Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-                    Where-Object { $_.ParentProcessId -eq [int]$killPid } |
-                    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-                Stop-Process -Id ([int]$killPid) -Force -ErrorAction SilentlyContinue
-                Write-Host "[EXIT] Killed runner PID $killPid + children for $($entry.agent_id)"
-            } catch {
-                Write-Host ("[EXIT] Kill attempt for PID $killPid failed: " + $_.Exception.Message)
+
+        # v2: No .exit file detection. The ONLY authoritative exit signal is .state JSON
+        # (state=exit, confirmed=true), which Sync-ReadState translates to ["finishing"] status.
+        # This function handles only the grace period and kill for finishing agents.
+
+        # If already finishing, handle grace period
+        if ("finishing" -in $entry.status) {
+            $seenAt = try {
+                if ($entry.PSObject.Properties["exit_seen_at"]) { [datetime]::Parse($entry.exit_seen_at) }
+                else { $null }
+            } catch { $null }
+            if (-not $seenAt) {
+                # No exit_seen_at timestamp, set it now
+                $entry | Add-Member -NotePropertyName "exit_seen_at" -NotePropertyValue (Get-Date).ToString("o") -Force
+                $entry.updated_at = (Get-Date).ToString("o")
+                $changed = $true
+                continue
             }
+            $elapsed = ((Get-Date) - $seenAt).TotalSeconds
+            if ($elapsed -lt 5) {
+                Write-Host "[EXIT] $($entry.agent_id) grace period: $([math]::Floor($elapsed))s / 5s"
+                continue
+            }
+            $killPid = $entry.pid
+            if ($killPid) {
+                try {
+                    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                        Where-Object { $_.ParentProcessId -eq [int]$killPid } |
+                        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+                    Stop-Process -Id ([int]$killPid) -Force -ErrorAction SilentlyContinue
+                    Write-Host "[EXIT] Killed runner PID $killPid + children for $($entry.agent_id)"
+                } catch {
+                    Write-Host ("[EXIT] Kill attempt for PID $killPid failed: " + $_.Exception.Message)
+                }
+            }
+            $entry.status = @("finished","ready"); $entry.pid = $null
+            $entry.updated_at = (Get-Date).ToString("o")
+            if ($entry.PSObject.Properties["exit_seen_at"]) {
+                $entry.PSObject.Properties.Remove("exit_seen_at")
+            }
+            Write-Host "[EXIT] $($entry.agent_id) cleanup complete"
+            $changed = $true
         }
-        $entry.status = @("finished","ready"); $entry.pid = $null
-        $entry.updated_at = (Get-Date).ToString("o")
-        $entry.PSObject.Properties.Remove("exit_seen_at")
-        Remove-Item $exitPath -ErrorAction SilentlyContinue
-        Write-Host "[EXIT] $($entry.agent_id) cleanup complete"
-        $changed = $true
     }
     if ($changed) { Save-Agents -Agents $Agents }
 }
 
 function Sync-All {
     param($Agents)
+    # 0. Read .state files for progress tracking
+    Sync-ReadState -Agents $Agents
+    Invalidate-Cache; $Agents = Read-Agents
+    # 1. Process agents in finishing status with 5s grace period before kill
     Sync-KillPending -Agents $Agents
     Invalidate-Cache; $Agents = Read-Agents
+    # 2. -p mode: runners that wrote done.json and exited cleanly
     Sync-DoneToManager -Agents $Agents
     Invalidate-Cache; $Agents = Read-Agents
     Sync-DeadToFailed -Agents $Agents
     Invalidate-Cache
+}
+
+# ====================================================
+# Preflight helper — validates role + InjectNormal BEFORE any manager mutation.
+# Uses throw (not exit): safe for host-embedded scenarios; top-level dispatch
+# will produce non-zero exit via $ErrorActionPreference = "Stop".
+# ====================================================
+
+function Assert-SendPreflight {
+    param([string]$TargetRole, [string]$TargetInjectNormal)
+
+    $roleDir = Join-Path $roleTemplatesDir $TargetRole
+    $legalPath = Join-Path $roleDir "legal_state.json"
+
+    # 1. legal_state.json must exist
+    if (-not (Test-Path -LiteralPath $legalPath -PathType Leaf)) {
+        throw "Rejected: Role '$TargetRole' has no legal_state.json. Use 'role register $TargetRole' to create a v2 role. Expected at: $legalPath"
+    }
+
+    # 2. legal_state.json must be parseable JSON
+    try {
+        $legalJson = Get-Content -LiteralPath $legalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        throw "Rejected: Role '$TargetRole' legal_state.json is not valid JSON and cannot be parsed."
+    }
+
+    # 3. mandatory states: running, exit
+    $ls = @($legalJson.states | ForEach-Object { [string]$_ })
+    if ("running" -notin $ls) {
+        throw "Rejected: Role '$TargetRole' missing mandatory state 'running' in legal_state.json"
+    }
+    if ("exit" -notin $ls) {
+        throw "Rejected: Role '$TargetRole' missing mandatory state 'exit' in legal_state.json"
+    }
+
+    # 4. exit_confirmation warning (non-fatal)
+    if (-not ($legalJson.PSObject.Properties["exit_confirmation"] -and $legalJson.exit_confirmation)) {
+        Write-Host "[MANAGER] WARNING: Role '$TargetRole' legal_state.json has no exit_confirmation."
+    }
+
+    # 5. InjectNormal template existence + readability
+    if ($TargetInjectNormal) {
+        $normalFile = Join-Path $roleDir "normal_prompt\$TargetInjectNormal.md"
+        if (-not (Test-Path -LiteralPath $normalFile -PathType Leaf)) {
+            throw "Rejected: Normal prompt template '$TargetInjectNormal' not found for role '$TargetRole'. Expected at: $normalFile"
+        }
+        try {
+            $null = Get-Content -LiteralPath $normalFile -Raw -Encoding UTF8 -ErrorAction Stop
+        } catch {
+            throw "Rejected: Normal prompt template '$TargetInjectNormal' exists but cannot be read: $_"
+        }
+    }
+
+    Write-Host "[MANAGER] Preflight OK: Role '$TargetRole' legal states: $($ls -join ', ')"
 }
 
 # ====================================================
@@ -423,31 +620,34 @@ function Invoke-SendInternal {
         [string]$AgentId,
         [string]$Prompt,
         [string]$Role = "explorer",
-        [string]$Model = ""
+        [string]$Model = "",
+        [string]$InjectNormal = ""
     )
     $Agents = Read-Agents
     $found = Find-ActiveAgent -TargetAgentId $AgentId -AgentsDict $Agents
     if (-not $found) {
+        $null = Assert-SendPreflight -TargetRole $Role -TargetInjectNormal $InjectNormal
         Write-Host "[MANAGER] Creating new agent: $AgentId"
         $entry = New-AgentEntry -AgentId $AgentId
         $key = $entry.internal_id
         $Agents[$key] = $entry
-        Save-Agents -Agents $Agents
-        _DoLaunch -AgentId $AgentId -Entry $entry -Prompt $Prompt -Role $Role -Model $Model
+        _DoLaunch -AgentId $AgentId -Entry $entry -Prompt $Prompt -Role $Role -Model $Model -InjectNormal $InjectNormal
         return
     }
     $entry = $found.entry
     if ("running" -notin $entry.status) {
-        _DoLaunch -AgentId $AgentId -Entry $entry -Prompt $Prompt -Role $Role -Model $Model
+        $null = Assert-SendPreflight -TargetRole $Role -TargetInjectNormal $InjectNormal
+        _DoLaunch -AgentId $AgentId -Entry $entry -Prompt $Prompt -Role $Role -Model $Model -InjectNormal $InjectNormal
         return
     }
+    $null = Assert-SendPreflight -TargetRole $Role -TargetInjectNormal $InjectNormal
     Write-Host "[MANAGER] Agent '$AgentId' is busy. Queuing."
-    $entry.pending_task = [ordered]@{ prompt = $Prompt; role = $Role; model = $Model }
+    $entry.pending_task = [ordered]@{ prompt = $Prompt; role = $Role; model = $Model; inject_normal = if ($InjectNormal) { $InjectNormal } else { "" } }
     Save-Agents -Agents $Agents
 }
 
 function _DoLaunch {
-    param($AgentId, $Entry, $Prompt, $Role, $Model)
+    param($AgentId, $Entry, $Prompt, $Role, $Model, $InjectNormal)
 
     $fresh = Has-Flag "-FreshSession"
     $isNewSession = (-not $Entry.session_uuid) -or $fresh
@@ -468,11 +668,16 @@ function _DoLaunch {
         $sendArgs['FreshSession'] = $true
     }
 
-    # Inject registered role templates when -Role is explicitly used
-    $roleTmpl = Get-RoleTemplateContent -RoleName $Role
-    if ($roleTmpl) {
-        $sendArgs['Prompt'] = $roleTmpl + "`n`n" + $Prompt
-        Write-Host "[MANAGER] Injected role template: $Role"
+    # === Defensive assertion: preflight already passed upstream; refuse if legal_state.json disappeared ===
+    $roleDir = Join-Path $roleTemplatesDir $Role
+    if (-not (Test-Path -LiteralPath (Join-Path $roleDir "legal_state.json") -PathType Leaf)) {
+        throw "INTERNAL ERROR: Role '$Role' legal_state.json lost after preflight. Refusing to launch."
+    }
+
+    # Pass -InjectNormal if specified
+    if ($InjectNormal) {
+        $sendArgs['InjectNormal'] = $InjectNormal
+        Write-Host "[MANAGER] Injecting normal_prompt template: $InjectNormal"
     }
 
     $gotLock = $false
@@ -498,12 +703,12 @@ function _DoLaunch {
         Write-Host "[LAUNCH] $AgentId role=$Role session=$($Entry.session_uuid) new=$isNewSession"
         $output = & $sendScript @sendArgs 2>&1
         $outStr = ($output | Out-String).Trim()
-        if ($LASTEXITCODE -ne 0) { Write-Host $outStr; exit $LASTEXITCODE }
+        if ($LASTEXITCODE -ne 0) { Write-Host $outStr; throw "Send-ClaudeCommand failed with exit code $LASTEXITCODE" }
 
         try { $launch = $outStr | ConvertFrom-Json }
         catch {
             if ($outStr -match '\{[\s\S]*"command_id"[\s\S]*\}') { $launch = $Matches[0] | ConvertFrom-Json }
-            else { Write-Host $outStr; exit 1 }
+            else { Write-Host $outStr; throw "Failed to parse launch JSON from Send-ClaudeCommand output" }
         }
 
         if ($Entry.PSObject.Properties["exit_seen_at"]) {
@@ -528,11 +733,12 @@ function _DoLaunch {
         $Entry.status = @("running")
         $Entry.pid = $launch.tui_pid
         $Entry.current_task = [ordered]@{
-            command_id  = $launch.command_id
-            prompt      = if ($Prompt.Length -gt 100) { $Prompt.Substring(0,100) + "..." } else { $Prompt }
-            role        = $Role
-            model       = $Model
-            launched_at = $launch.launched_at
+            command_id    = $launch.command_id
+            prompt        = if ($Prompt.Length -gt 100) { $Prompt.Substring(0,100) + "..." } else { $Prompt }
+            role          = $Role
+            model         = $Model
+            inject_normal = if ($InjectNormal) { $InjectNormal } else { "" }
+            launched_at   = $launch.launched_at
         }
         $Entry.updated_at = (Get-Date).ToString("o")
         $Agents = Read-Agents
@@ -557,20 +763,20 @@ function Invoke-Send {
 
     $found = Find-ActiveAgent -TargetAgentId $AgentName -AgentsDict $Agents
     if (-not $found) {
+        $null = Assert-SendPreflight -TargetRole $Role -TargetInjectNormal $InjectNormal
         $entry = New-AgentEntry -AgentId $AgentName
         $key = $entry.internal_id
         $Agents[$key] = $entry
-        Save-Agents -Agents $Agents
-        Invalidate-Cache
-        _DoLaunch -AgentId $AgentName -Entry $entry -Prompt $Prompt -Role $Role -Model $Model
+        _DoLaunch -AgentId $AgentName -Entry $entry -Prompt $Prompt -Role $Role -Model $Model -InjectNormal $InjectNormal
         return
     }
 
     $entry = $found.entry
     if ("running" -notin $entry.status) {
+        $null = Assert-SendPreflight -TargetRole $Role -TargetInjectNormal $InjectNormal
         Invalidate-Cache; $Agents = Read-Agents
         $entry = $Agents[$found.key]
-        _DoLaunch -AgentId $AgentName -Entry $entry -Prompt $Prompt -Role $Role -Model $Model
+        _DoLaunch -AgentId $AgentName -Entry $entry -Prompt $Prompt -Role $Role -Model $Model -InjectNormal $InjectNormal
         return
     }
 
@@ -601,12 +807,14 @@ function Invoke-Send {
     }
 
     if ($choice -eq "W" -or $choice -eq "w") {
+        $null = Assert-SendPreflight -TargetRole $Role -TargetInjectNormal $InjectNormal
         Invalidate-Cache; $Agents = Read-Agents
         $entry = $Agents[$found.key]
         $entry.pending_task = [ordered]@{
-            prompt = $Prompt
-            role   = $Role
-            model  = $Model
+            prompt        = $Prompt
+            role          = $Role
+            model         = $Model
+            inject_normal = if ($InjectNormal) { $InjectNormal } else { "" }
         }
         $entry.updated_at = (Get-Date).ToString("o")
         Save-Agents -Agents $Agents
@@ -636,13 +844,14 @@ function Invoke-Agents {
         return
     }
 
-    Write-Host ("{0,-22} {1,-12} {2,-12} {3,-38}" -f "Agent ID", "Worker State", "Output State", "Session UUID")
+    Write-Host ("{0,-22} {1,-12} {2,-14} {3,-12} {4,-38}" -f "Agent ID", "Worker State", "State", "Output State", "Session UUID")
     Write-Host ("-" * 88)
     foreach ($e in $filtered) {
         $ws = Get-WorkerState $e
         $os = Get-OutputState $e
+        $cs = if ($e.PSObject.Properties["current_state"] -and $e.current_state) { [string]$e.current_state } else { "-" }
         $sid = if ($e.session_uuid) { [string]$e.session_uuid } else { "(none)" }
-        Write-Host ("{0,-22} {1,-12} {2,-12} {3,-38}" -f $e.agent_id, $ws, $os, $sid)
+        Write-Host ("{0,-22} {1,-12} {2,-14} {3,-12} {4,-38}" -f $e.agent_id, $ws, $cs, $os, $sid)
         if ($e.current_task -and $e.current_task.prompt) {
             Write-Host ("   Task: {0}" -f $e.current_task.prompt)
         }
@@ -669,6 +878,7 @@ function Invoke-AgentDetail {
     Write-Host "=========================================="
     Write-Host "  Internal ID   : $($e.internal_id)"
     Write-Host "  Worker State  : $(Get-WorkerState $e)"
+    Write-Host "  Current State : $(if ($e.PSObject.Properties["current_state"] -and $e.current_state) { $e.current_state } else { '-' })"
     Write-Host "  Output State  : $(Get-OutputState $e)"
     Write-Host "  Status tags   : $($e.status -join ', ')"
     Write-Host "  Session UUID  : $($e.session_uuid)"
@@ -686,7 +896,12 @@ function Invoke-AgentDetail {
     }
     if ($e.pending_task) {
         Write-Host "  --- Pending Task ---"
-        Write-Host "  Prompt: $($e.pending_task.prompt)"
+        $e.pending_task | ConvertTo-Json -Depth 5 | Write-Host
+        Write-Host ""
+    }
+    if ($e.PSObject.Properties["pending_task_error"] -and $e.pending_task_error) {
+        Write-Host "  --- Pending Task Error ---"
+        Write-Host "  $($e.pending_task_error)"
         Write-Host ""
     }
 }
@@ -860,10 +1075,39 @@ function Invoke-Result {
 
     $safe = $AgentId -replace '[^a-zA-Z0-9_.-]', '_'
     $resultPath = Join-Path $skillRoot "store\$safe\results\$($task.command_id).result.md"
+    $statePath = Join-Path $skillRoot "run\$safe\.$($task.command_id).state"
+
+    # Show state summary first (always available if worker used Update-WorkerState)
+    if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+        try {
+            $stateContent = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8
+            try {
+                $stateJson = $stateContent | ConvertFrom-Json
+                Write-Host "=== State Summary ==="
+                Write-Host "Command ID : $($stateJson.command_id)"
+                Write-Host "Role       : $($stateJson.role)"
+                Write-Host "State      : $($stateJson.state)"
+                Write-Host "Confirmed  : $($stateJson.confirmed)"
+                Write-Host "Updated    : $($stateJson.updated_at)"
+                if ($stateJson.PSObject.Properties["summary_message"] -and $stateJson.summary_message) {
+                    Write-Host "Summary    : $($stateJson.summary_message)"
+                }
+                Write-Host ""
+            } catch {
+                Write-Host "=== State (text) === "
+                Write-Host $stateContent
+                Write-Host ""
+            }
+        } catch {}
+    }
+
+    # Show result.md (convenience viewer, not authoritative)
     if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
+        Write-Host "=== Result ==="
         Get-Content -LiteralPath $resultPath -Raw
     } else {
-        Write-Host "(result.md not found at $resultPath)"
+        Write-Host "=== Result (no result.md) ==="
+        Write-Host "(result.md is optional in v2; use state summary above for task outcome.)"
     }
 }
 
@@ -918,10 +1162,9 @@ function Invoke-Remove {
 # ====================================================
 
 function Invoke-RoleRegister {
-    param([string]$RoleName, [string[]]$Files, [switch]$Force)
+    param([string]$RoleName, [string[]]$Files, [string]$StateFile, [switch]$Force)
 
-    if (-not $RoleName) { throw "Usage: ClaudeTui role register <name> -Files <path> [<path> ...] [-Force]" }
-    if (-not $Files -or $Files.Count -eq 0) { throw "Missing -Files. Usage: role register <name> -Files <path> [<path> ...]" }
+    if (-not $RoleName) { throw "Usage: ClaudeTui role register <name> [-Force]" }
     $safeRole = $RoleName -replace '[^a-zA-Z0-9_.-]', '_'
 
     $roles = Read-Roles
@@ -929,83 +1172,131 @@ function Invoke-RoleRegister {
         $existing = $roles[$safeRole]
         Write-Host "[MANAGER] Role '$safeRole' already exists:"
         Write-Host "  Registered by : $($existing.registered_by)"
-        Write-Host "  Templates     : $($existing.templates -join ', ')"
         Write-Host "  Created       : $($existing.created_at)"
         Write-Host ""
         Write-Host "  Use -Force to overwrite, or choose a different name."
         exit 1
     }
 
-    # Validate all source files exist
-    foreach ($f in $Files) {
-        if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw "File not found: $f" }
-    }
-
-    # Create / overwrite template directory
+    # Create v2 directory structure with 3 subdirectories + legal_state.json
     $targetDir = Join-Path $roleTemplatesDir $safeRole
-    Remove-Item $targetDir -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
-
-    $copied = @()
-    foreach ($f in $Files) {
-        $name = Split-Path -Leaf $f
-        Copy-Item -LiteralPath $f -Destination (Join-Path $targetDir $name) -Force
-        $copied += $name
+    if ($Force) {
+        Remove-Item $targetDir -Recurse -Force -ErrorAction SilentlyContinue
     }
+    $sysDir = Join-Path $targetDir "system_prompt"
+    $hdrDir = Join-Path $targetDir "header_prompt"
+    $nrmDir = Join-Path $targetDir "normal_prompt"
+    New-Item -ItemType Directory -Force -Path $sysDir, $hdrDir, $nrmDir | Out-Null
+
+    # Write default legal_state.json
+    $legalPath = Join-Path $targetDir "legal_state.json"
+    $defaultLegal = [ordered]@{
+        version            = "1"
+        states             = @("running", "exit")
+        exit_confirmation  = "你确认已经完整执行主控要求的结束流程，并留下主控可验收的结果或证据了吗？"
+        description        = "Default legal states for $safeRole"
+    }
+    $defaultLegal | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $legalPath -Encoding UTF8
 
     $now = (Get-Date).ToString("o")
     $roles[$safeRole] = [ordered]@{
         role_name      = $safeRole
         registered_by  = if ($env:USERNAME) { $env:USERNAME } else { "unknown" }
-        templates      = $copied
+        structure      = "v2"
         created_at     = $now
         updated_at     = $now
     }
     Save-Roles $roles
-    Write-Host "[MANAGER] Role '$safeRole' registered with $($copied.Count) template(s): $($copied -join ', ')"
+    Write-Host "[MANAGER] Role '$safeRole' registered (v2 structure)"
+    Write-Host "  Directories: system_prompt/, header_prompt/, normal_prompt/"
+    Write-Host "  legal_state.json: $legalPath"
+    Write-Host "  States: running, exit"
+    Write-Host ""
+    Write-Host "  Next: add .md files to system_prompt/, header_prompt/, normal_prompt/ as needed."
 }
 
 function Invoke-RoleUpdate {
-    param([string]$RoleName, [string[]]$Files)
+    param([string]$RoleName, [string[]]$Files, [string]$StateFile)
 
-    if (-not $RoleName) { throw "Usage: ClaudeTui role update <name> -Files <path> [<path> ...]" }
-    if (-not $Files -or $Files.Count -eq 0) { throw "Missing -Files." }
+    if (-not $RoleName) { throw "Usage: ClaudeTui role update <name>" }
     $safeRole = $RoleName -replace '[^a-zA-Z0-9_.-]', '_'
 
     $roles = Read-Roles
     if (-not $roles.Contains($safeRole)) { throw "Role '$safeRole' not found. Use 'role register' first." }
 
-    foreach ($f in $Files) {
-        if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw "File not found: $f" }
-    }
-
     $targetDir = Join-Path $roleTemplatesDir $safeRole
-    Remove-Item $targetDir -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+    # Ensure v2 subdirectories exist (create if missing, for upgrade from flat)
+    $sysDir = Join-Path $targetDir "system_prompt"
+    $hdrDir = Join-Path $targetDir "header_prompt"
+    $nrmDir = Join-Path $targetDir "normal_prompt"
+    New-Item -ItemType Directory -Force -Path $sysDir, $hdrDir, $nrmDir | Out-Null
 
-    $copied = @()
-    foreach ($f in $Files) {
-        $name = Split-Path -Leaf $f
-        Copy-Item -LiteralPath $f -Destination (Join-Path $targetDir $name) -Force
-        $copied += $name
+    # Ensure legal_state.json exists
+    $legalPath = Join-Path $targetDir "legal_state.json"
+    if (-not (Test-Path -LiteralPath $legalPath -PathType Leaf)) {
+        $defaultLegal = [ordered]@{
+            version            = "1"
+            states             = @("running", "exit")
+            exit_confirmation  = "你确认已经完整执行主控要求的结束流程，并留下主控可验收的结果或证据了吗？"
+            description        = "Default legal states for $safeRole"
+        }
+        $defaultLegal | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $legalPath -Encoding UTF8
+        Write-Host "[MANAGER] Created missing legal_state.json for '$safeRole'"
     }
 
-    $roles[$safeRole].templates = $copied
+    # If -StateFile provided, update legal_state.json states
+    if ($StateFile) {
+        if (-not (Test-Path -LiteralPath $StateFile -PathType Leaf)) { throw "StateFile not found: $StateFile" }
+        $st = @(Get-Content -LiteralPath $StateFile | Where-Object { $_.Trim() -ne "" } | ForEach-Object { $_.Trim() })
+        if ("exit" -notin $st) { $st += @("exit") }
+        if ("running" -notin $st) { $st += @("running") }
+        try {
+            $ls = Get-Content -LiteralPath $legalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $ls.states = [array]$st
+            $ls | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $legalPath -Encoding UTF8
+            Write-Host "[MANAGER] Updated legal_state.json states for '$safeRole': $($st -join ', ')"
+        } catch {
+            Write-Host "[MANAGER] Failed to update legal_state.json: $_"
+        }
+    }
+
+    if ($Files -and $Files.Count -gt 0) {
+        Write-Host "[MANAGER] ERROR: -Files is not supported in v2."
+        Write-Host "  Place .md files directly into:"
+        Write-Host "    $sysDir"
+        Write-Host "    $hdrDir"
+        Write-Host "    $nrmDir"
+        exit 1
+    }
+
+    $roles[$safeRole].structure = "v2"
     $roles[$safeRole].updated_at = (Get-Date).ToString("o")
     Save-Roles $roles
-    Write-Host "[MANAGER] Role '$safeRole' updated with $($copied.Count) template(s): $($copied -join ', ')"
+    Write-Host "[MANAGER] Role '$safeRole' updated."
 }
 
 function Invoke-RoleList {
     $roles = Read-Roles
     if ($roles.Count -eq 0) { Write-Host "No roles registered."; return }
-    Write-Host ("{0,-26} {1,-16} {2,-20} {3}" -f "Role Name", "Registered By", "Updated", "Templates")
-    Write-Host ("-" * 90)
+    Write-Host ("{0,-26} {1,-16} {2,-10} {3,-20} {4}" -f "Role Name", "Registered By", "Structure", "Updated", "Details")
+    Write-Host ("-" * 100)
     foreach ($k in @($roles.Keys)) {
         $r = $roles[$k]
-        $templates = $r.templates -join ', '
+        $struct = if ($r.PSObject.Properties["structure"] -and $r.structure) { $r.structure } else { "flat/v1" }
         $upStr = [string]$r.updated_at; if ($upStr.Length -gt 19) { $upStr = $upStr.Substring(0,19) }
-        Write-Host ("{0,-26} {1,-16} {2,-20} {3}" -f $r.role_name, $r.registered_by, $upStr, $templates)
+        # Get legal states
+        $dir = Join-Path $roleTemplatesDir $k
+        $legalPath = Join-Path $dir "legal_state.json"
+        $details = ""
+        if (Test-Path -LiteralPath $legalPath -PathType Leaf) {
+            try {
+                $ls = Get-Content -LiteralPath $legalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                $details = "states: $(($ls.states | ForEach-Object { [string]$_ }) -join ',')"
+            } catch { $details = "legal_state.json parse error" }
+        } elseif ($r.states) {
+            $details = "states(v1): $($r.states -join ',')"
+        }
+        Write-Host ("{0,-26} {1,-16} {2,-10} {3,-20} {4}" -f $r.role_name, $r.registered_by, $struct, $upStr, $details)
     }
     Write-Host ""; Write-Host ("Total: {0} role(s)" -f $roles.Count)
 }
@@ -1021,19 +1312,98 @@ function Invoke-RoleShow {
     Write-Host "  Role: $($r.role_name)"
     Write-Host "=========================================="
     Write-Host "  Registered by : $($r.registered_by)"
-    Write-Host "  Templates     : $($r.templates -join ', ')"
+    Write-Host "  Structure     : $(if ($r.PSObject.Properties["structure"] -and $r.structure) { $r.structure } else { 'flat (v1)' })"
     Write-Host "  Created       : $($r.created_at)"
     Write-Host "  Updated       : $($r.updated_at)"
     Write-Host ""
+
     $dir = Join-Path $roleTemplatesDir $safeRole
-    foreach ($t in $r.templates) {
-        $tp = Join-Path $dir $t
-        if (Test-Path -LiteralPath $tp -PathType Leaf) {
-            Write-Host "  --- $t ($((Get-Item $tp).Length) bytes) ---"
-            Write-Host (Get-Content -LiteralPath $tp -Raw)
-            Write-Host ""
+
+    # Display legal_state.json
+    $legalPath = Join-Path $dir "legal_state.json"
+    if (Test-Path -LiteralPath $legalPath -PathType Leaf) {
+        Write-Host "  --- legal_state.json ---"
+        try {
+            $ls = Get-Content -LiteralPath $legalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            Write-Host "  States           : $(($ls.states | ForEach-Object { [string]$_ }) -join ', ')"
+            if ($ls.PSObject.Properties["exit_confirmation"] -and $ls.exit_confirmation) {
+                Write-Host "  Exit Confirmation: $($ls.exit_confirmation)"
+            }
+            if ($ls.PSObject.Properties["description"] -and $ls.description) {
+                Write-Host "  Description      : $($ls.description)"
+            }
+            if ($ls.PSObject.Properties["version"] -and $ls.version) {
+                Write-Host "  Version          : $($ls.version)"
+            }
+        } catch {
+            Write-Host "  (parse error: $_)"
+        }
+        Write-Host ""
+    } else {
+        Write-Host "  legal_state.json: NOT FOUND"
+        Write-Host ""
+    }
+
+    # Display system_prompt files
+    $sysDir = Join-Path $dir "system_prompt"
+    Write-Host "  --- system_prompt/ ---"
+    if (Test-Path -LiteralPath $sysDir -PathType Container) {
+        $sysFiles = @(Get-ChildItem -LiteralPath $sysDir -Filter "*.md" -File -ErrorAction SilentlyContinue | Sort-Object Name)
+        if ($sysFiles.Count -gt 0) {
+            foreach ($sf in $sysFiles) {
+                Write-Host "    $($sf.Name) ($($sf.Length) bytes)"
+            }
         } else {
-            Write-Host "  --- $t (MISSING) ---"
+            Write-Host "    (empty)"
+        }
+    } else {
+        Write-Host "    (directory not found)"
+    }
+    Write-Host ""
+
+    # Display header_prompt files
+    $hdrDir = Join-Path $dir "header_prompt"
+    Write-Host "  --- header_prompt/ ---"
+    if (Test-Path -LiteralPath $hdrDir -PathType Container) {
+        $hdrFiles = @(Get-ChildItem -LiteralPath $hdrDir -Filter "*.md" -File -ErrorAction SilentlyContinue | Sort-Object Name)
+        if ($hdrFiles.Count -gt 0) {
+            foreach ($hf in $hdrFiles) {
+                Write-Host "    $($hf.Name) ($($hf.Length) bytes)"
+            }
+        } else {
+            Write-Host "    (empty)"
+        }
+    } else {
+        Write-Host "    (directory not found)"
+    }
+    Write-Host ""
+
+    # Display normal_prompt templates
+    $nrmDir = Join-Path $dir "normal_prompt"
+    Write-Host "  --- normal_prompt/ (available templates for -InjectNormal) ---"
+    if (Test-Path -LiteralPath $nrmDir -PathType Container) {
+        $nrmFiles = @(Get-ChildItem -LiteralPath $nrmDir -Filter "*.md" -File -ErrorAction SilentlyContinue | Sort-Object Name)
+        if ($nrmFiles.Count -gt 0) {
+            foreach ($nf in $nrmFiles) {
+                $templateName = $nf.BaseName
+                Write-Host "    $templateName ($($nf.Length) bytes)"
+                Write-Host "      Usage: send ... -InjectNormal $templateName"
+            }
+        } else {
+            Write-Host "    (no templates available)"
+        }
+    } else {
+        Write-Host "    (directory not found)"
+    }
+    Write-Host ""
+
+    # Also show any flat files at role root (v1 compat)
+    $flatFiles = @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notlike "legal_state.json" })
+    if ($flatFiles.Count -gt 0) {
+        Write-Host "  --- Root-level files (legacy) ---"
+        foreach ($ff in $flatFiles) {
+            Write-Host "    $($ff.Name) ($($ff.Length) bytes)"
         }
     }
 }
@@ -1066,8 +1436,8 @@ switch ($Command) {
         $roleNameArg = if ($scriptArgs.Count -gt 2 -and $scriptArgs[2] -notlike "-*") { $scriptArgs[2] } else { $null }
         $forceFlag = Has-Flag "-Force"
         switch ($roleSub) {
-            "register"    { Invoke-RoleRegister -RoleName $roleNameArg -Files $RoleFiles -Force:$forceFlag }
-            "update"      { Invoke-RoleUpdate -RoleName $roleNameArg -Files $RoleFiles }
+            "register"    { Invoke-RoleRegister -RoleName $roleNameArg -Files $RoleFiles -StateFile $RoleStateFile -Force:$forceFlag }
+            "update"      { Invoke-RoleUpdate -RoleName $roleNameArg -Files $RoleFiles -StateFile $RoleStateFile }
             "list"        { Invoke-RoleList }
             "show"        { Invoke-RoleShow -RoleName $roleNameArg }
             "unregister"  { Invoke-RoleUnregister -RoleName $roleNameArg }

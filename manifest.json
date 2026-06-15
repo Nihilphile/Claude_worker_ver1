@@ -1,8 +1,8 @@
 {
-  "name": "claude_worker_ver1",
-  "display_name": "Claude Worker v1",
-  "version": "0.2.0",
-  "description": "Manager-layer file-protocol multi-agent orchestration for Claude Code. Dual-mode runners (-p/TUI), role registry, system prompt templates.",
+  "name": "claude_worker_ver2",
+  "display_name": "Claude Worker v2",
+  "version": "0.3.0",
+  "description": "Manager-layer file-protocol multi-agent orchestration for Claude Code. Dual-mode runners (-p/TUI), v2 role system with layered prompt injection, JSON state tracking.",
   "entry_skill": "SKILL.md",
   "requires": {
     "claude_code": "2.1.172"
@@ -10,7 +10,8 @@
   "scripts": {
     "cli_manager": "scripts/ClaudeTui.ps1",
     "worker_launcher": "scripts/Send-ClaudeCommand.ps1",
-    "completion_handler": "scripts/Complete-ClaudeTask.ps1",
+    "completion_handler": "scripts/Complete-ClaudeTask.ps1 (deprecated)",
+    "state_tracker": "scripts/Update-WorkerState.ps1",
     "runtime_cleanup": "scripts/Stop-ClaudeRuntime.ps1",
     "legacy": [
       "scripts/Start-ClaudeAgent.ps1",
@@ -34,10 +35,11 @@
     "runners": ["-p", "tui"],
     "session_uuid_source": "filesystem scan (new) or done.json (subsequent)",
     "done": "store/<agent>/results/<command-id>.done.json",
-    "result": "store/<agent>/results/<command-id>.result.md",
+    "result": "store/<agent>/results/<command-id>.result.md (convenience viewer, not authoritative)",
+    "state": "run/<agent>/.<command-id>.state (JSON, authoritative exit signal)",
     "backend": "claude",
     "permissions": ".claude/worker-permissions.json",
-    "system_prompt": "prompt_templates/default/system.md (--system-prompt-file)"
+    "system_prompt": "prompt_templates/default/system.md + role system_prompt/*.md (--system-prompt-file, layered)"
   },
   "stores": {
     "persistent": ["store/<agent>/results/", "prompt_templates/"],

@@ -5,6 +5,7 @@ run/*.lock
 
 # Worker data (per-agent store)
 store/*/
+store/registry.json
 !store/.gitkeep
 
 # Manager state (runtime data)

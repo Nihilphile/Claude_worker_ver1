@@ -174,9 +174,11 @@ if (-not $NoCleanup) {
 
 Write-Host "[CLAUDE_WORKER_COMPLETE] $CommandId state=$State exit=$ExitCode"
 
-# Write .exit signal for manager's cleanup loop.
-# Manager's Sync-All detects this, waits 15s for session release, then kills the runner window.
-$exitSignal = Join-Path $skillRoot "run\$safeAgentName\.$CommandId.exit"
-Write-Output "$(Get-Date -Format 'o')" | Out-File -LiteralPath $exitSignal -Encoding UTF8
+# DEPRECATED (v2): .exit signal is no longer written by Complete-ClaudeTask.
+# In v2, the worker lifecycle is managed via Update-WorkerState --exit --Confirm,
+# which writes the .state JSON and .exit signal. The manager reads .state for
+# the authoritative exit status. Complete-ClaudeTask is kept as a convenience
+# stub for writing result/done files but is no longer required by the worker prompt.
+# The manager's Sync-ReadState detects exit from .state JSON, not from .exit here.
 
 exit $ExitCode

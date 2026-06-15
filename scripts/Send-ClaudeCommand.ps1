@@ -11,7 +11,8 @@ param(
     [string]$Model = "",
     [string]$SessionId = "",
     [ValidateSet("p", "tui")]
-    [string]$Mode = "p"
+    [string]$Mode = "p",
+    [string]$InjectNormal = ""
 )
 
 Set-StrictMode -Version Latest
@@ -238,6 +239,28 @@ function Build-WorkerPrompt {
         $header = (Get-Content -LiteralPath $headerPath -Raw -Encoding UTF8).Trim()
         $header = $header -replace '~~ROLE~~', $Role
     }
+
+    # --- InjectNormal: load and prepend normal_prompt template ---
+    $injectBlock = ""
+    if ($InjectNormal) {
+        $normalFile = Join-Path $skillRoot "prompt_templates\role\$Role\normal_prompt\$InjectNormal.md"
+        Write-Host "[INJECT-NORMAL] Loading: $normalFile"
+        if (-not (Test-Path -LiteralPath $normalFile -PathType Leaf)) {
+            throw "InjectNormal error: Normal prompt template '$InjectNormal' not found for role '$Role'. Expected at: $normalFile"
+        }
+        try {
+            $normalContent = (Get-Content -LiteralPath $normalFile -Raw -Encoding UTF8).Trim()
+        } catch {
+            throw "InjectNormal error: Normal prompt template '$InjectNormal' exists but cannot be read: $_"
+        }
+        $injectBlock = @"
+
+
+INJECTED NORMAL PROMPT: $InjectNormal (role: $Role)
+$normalContent
+"@
+    }
+
     return @"
 $header
 Automated pipeline. No confirmation needed. No exploring beyond the task.
@@ -246,7 +269,7 @@ MANDATORY COMPLETION — after the task, do these steps:
 1. Write a summary of what you did to: $resultPath
 2. Call: powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$completeScriptPath" -AgentName "$AgentName" -CommandId "$commandId" -ResultPath "$resultPath" -DonePath "$donePath"
 If task failed: add -State failed -ExitCode 1. Step 2 is non-negotiable.
-
+$injectBlock
 TASK:
 $UserPrompt
 "@
@@ -462,8 +485,8 @@ if ("$curSessionId" -ne "") {
 `$promptContent = Get-Content -LiteralPath "$promptPath" -Raw -Encoding UTF8
 if (`$promptContent) { `$fullArgs += ,`$promptContent }
 
-	# Append system prompt (runtime contract, compression-resistant)
-	if ("$systemPromptPath" -ne "") { `$fullArgs += @("--system-prompt-file", "$systemPromptPath") }
+# Append system prompt (runtime contract, compression-resistant)
+if ("$systemPromptPath" -ne "") { `$fullArgs += @("--system-prompt-file", "$systemPromptPath") }
 Write-Host "[RUNNER] Launching Claude..."
 & claude @fullArgs
 `$exit = `$LASTEXITCODE
