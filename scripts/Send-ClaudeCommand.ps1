@@ -242,10 +242,11 @@ function Build-WorkerPrompt {
 $header
 Automated pipeline. No confirmation needed. No exploring beyond the task.
 
-MANDATORY COMPLETION — after the task, do these steps:
-1. Write a summary of what you did to: $resultPath
+MANDATORY COMPLETION — your LAST step, always. Do this even if the task seems trivial.
+1. Write what you did to: $resultPath
 2. Call: powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$completeScriptPath" -AgentName "$AgentName" -CommandId "$commandId" -ResultPath "$resultPath" -DonePath "$donePath"
-If task failed: add -State failed -ExitCode 1. Step 2 is non-negotiable.
+If task failed: add -State failed -ExitCode 1.
+FORGETTING STEP 2 MEANS FALSE FAILURE. The orchestrator cannot see your result without it.
 
 TASK:
 $UserPrompt
@@ -522,20 +523,26 @@ if ("$curSessionId" -ne "") {
 }
 `$exit = `$LASTEXITCODE
 
-if (`$exit -eq 0 -and `$jsonOut) {
-    try {
-        `$j = `$jsonOut | ConvertFrom-Json
-        Set-Content "$resultPath" `$j.result -Encoding UTF8
-        `$sid = if (`$j.session_id) { `$j.session_id } else { "$curSessionId" }
-        # Store real Claude UUID for manager to pick up
-        `$sidFile = Join-Path "$storeRoot" ".claude-sid.txt"
-        Set-Content `$sidFile `$sid -Encoding UTF8
-        # done.json with session_id — manager Sync-DoneToManager reads this
-        @{id="$commandId";state="completed";exit_code=0;result="$resultPath";completed_at=(Get-Date).ToString("o");message="ok";backend="claude";session_id=`$sid} | ConvertTo-Json | Set-Content "$donePath" -Encoding UTF8
-    } catch { Write-Host "[PARSE]" }
-}
+	`$sidFile = Join-Path "$storeRoot" ".claude-sid.txt"
+	`$sid = if (Test-Path `$sidFile) { (Get-Content `$sidFile -Raw).Trim() } else { "$curSessionId" }
+	`$wroteDone = `$false
+	if (`$exit -eq 0 -and `$jsonOut) {
+	    try {
+	        `$j = `$jsonOut | ConvertFrom-Json
+	        Set-Content "$resultPath" `$j.result -Encoding UTF8
+	        `$sid = if (`$j.session_id) { `$j.session_id } else { `$sid }
+	        Set-Content `$sidFile `$sid -Encoding UTF8
+	        @{id="$commandId";state="completed";exit_code=0;result="$resultPath";completed_at=(Get-Date).ToString("o");message="ok";backend="claude";session_id=`$sid} | ConvertTo-Json | Set-Content "$donePath" -Encoding UTF8
+	        `$wroteDone = `$true
+	    } catch { Write-Host "[PARSE]" }
+	}
+	if (-not `$wroteDone) {
+	    if (-not (Test-Path "$resultPath")) { "" | Set-Content "$resultPath" -Encoding UTF8 }
+	    Set-Content `$sidFile `$sid -Encoding UTF8
+	    @{id="$commandId";state="completed";exit_code=`$exit;result="$resultPath";completed_at=(Get-Date).ToString("o");message="Claude exited without Complete-ClaudeTask (code `$exit)";backend="claude";session_id=`$sid} | ConvertTo-Json | Set-Content "$donePath" -Encoding UTF8
+	}
 
-Write-Output "exit=`$exit" | Out-File -LiteralPath "$transcriptPath" -Encoding UTF8
+	Write-Output "exit=`$exit" | Out-File -LiteralPath "$transcriptPath" -Encoding UTF8
 "@
     Set-Content -LiteralPath $runnerPath -Value $pTemplate -Encoding UTF8
 }
